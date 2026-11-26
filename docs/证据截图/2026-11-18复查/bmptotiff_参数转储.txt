@@ -1,0 +1,86 @@
+dlgonly install: orig=025D0000 base=00400000 dir=C:\Home\Workspace\UGit\psdto\_review\pkgA\
+open åˆ—è¡¨ 3 æ¡
+OPEN-req: hwnd=003F052E flags=0x880024 filteridx=1 filter=[PSD file (*.psd) *.psd ] defext=*.psd
+OPEN å¯¹è¯æ¡† #0 -> C:\Home\Workspace\UGit\psdto\_review\bio_ascii.psd
+OPEN-req: hwnd=003F052E flags=0x880024 filteridx=1 filter=[tw3d2;tw3d *.tw3d2;*.tw3d tw3d2 *.tw3d2 tw3d *.tw3d ] defext=*.tw3d2;*.tw3d
+OPEN å¯¹è¯æ¡† #1 -> C:\Home\Workspace\UGit\psdto\_review\bio_ascii.tw3d2
+save åˆ—è¡¨ 2 æ¡
+SAVE-req: hwnd=003F052E flags=0x880026 filteridx=1 filter=[Tiff (*.tif) *.tif ] defext=*.tif
+SAVE å¯¹è¯æ¡† #0 -> C:\Home\Workspace\UGit\psdto\_review\runs\A_bmpdump\out.tif
+bmptotiff(#0) called
+  a1=026B6340  str="ÔLB"  hex=D44C420000000000C99C410000000000
+  a2=002DC6C0
+  a3=00000000
+  a4=002DC6C0
+  a5=00000000
+  a6=07E42EEC  str="c:\ok3dtemp\vwd011.gjs"  hex=633A5C6F6B336474656D705C76776430
+bmptotiff(#0) called
+  a1=026B6340  str="ÔLB"  hex=D44C420000000000C99C410000000000
+  a2=002DC6C0
+  a3=00000000
+  a4=002DC6C0
+  a5=00000000
+  a6=06B40050  str="c:\ok3dtemp\vwd010.gjs"  hex=633A5C6F6B336474656D705C76776430
+bmptotiff(#0) called
+  a1=026B6340  str="ÔLB"  hex=D44C420000000000C99C410000000000
+  a2=002DC6C0
+  a3=00000000
+  a4=002DC6C0
+  a5=00000000
+  a6=07E42ECC  str="c:\ok3dtemp\vwd009.gjs"  hex=633A5C6F6B336474656D705C76776430
+bmptotiff(#0) called
+  a1=026B6340  str="ÔLB"  hex=D44C420000000000C99C410000000000
+  a2=002DC6C0
+  a3=00000000
+  a4=002DC6C0
+  a5=00000000
+  a6=06AA1914  str="c:\ok3dtemp\vwd008.gjs"  hex=633A5C6F6B336474656D705C76776430
+bmptotiff(#0) called
+  a1=026B6340  str="ÔLB"  hex=D44C420000000000C99C410000000000
+  a2=002DC6C0
+  a3=00000000
+  a4=002DC6C0
+  a5=00000000
+  a6=06FF5DC4  str="c:\ok3dtemp\vwd007.gjs"  hex=633A5C6F6B336474656D705C76776430
+bmptotiff(#0) called
+  a1=026B6340  str="ÔLB"  hex=D44C420000000000C99C410000000000
+  a2=002DC6C0
+  a3=00000000
+  a4=002DC6C0
+  a5=00000000
+  a6=06B40050  str="c:\ok3dtemp\vwd006.gjs"  hex=633A5C6F6B336474656D705C76776430
+bmptotiff(#0) called
+  a1=026B6340  str="ÔLB"  hex=D44C420000000000C99C410000000000
+  a2=002DC6C0
+  a3=00000000
+  a4=002DC6C0
+  a5=00000000
+  a6=06B40074  str="c:\ok3dtemp\vwd005.gjs"  hex=633A5C6F6B336474656D705C76776430
+bmptotiff(#0) called
+  a1=026B6340  str="ÔLB"  hex=D44C420000000000C99C410000000000
+  a2=002DC6C0
+  a3=00000000
+  a4=002DC6C0
+  a5=00000000
+  a6=06FF5E28  str="c:\ok3dtemp\vwd004.gjs"  hex=633A5C6F6B336474656D705C76776430
+bmptotiff(#0) called
+  a1=026B6340  str="ÔLB"  hex=D44C420000000000C99C410000000000
+  a2=002DC6C0
+  a3=00000000
+  a4=002DC6C0
+  a5=00000000
+  a6=06AA1914  str="c:\ok3dtemp\vwd003.gjs"  hex=633A5C6F6B336474656D705C76776430
+bmptotiff(#0) called
+  a1=026B6340  str="ÔLB"  hex=D44C420000000000C99C410000000000
+  a2=002DC6C0
+  a3=00000000
+  a4=002DC6C0
+  a5=00000000
+  a6=06FF5DC4  str="c:\ok3dtemp\vwd002.gjs"  hex=633A5C6F6B336474656D705C76776430
+bmptotiff(#0) called
+  a1=026B6340  str="ÔLB"  hex=D44C420000000000C99C410000000000
+  a2=002DC6C0
+  a3=00000000
+  a4=002DC6C0
+  a5=00000000
+  a6=06AA1924  str="c:\ok3dtemp\vwd001.gjs"  hex=633A5C6F6B336474656D705C76776430

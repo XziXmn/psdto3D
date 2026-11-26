@@ -1,0 +1,44 @@
+== licensed A_log ==
+   t=0.0    files=0     ly=0   vwd=0
+   t=12.3   files=4     ly=2   vwd=0
+   t=13.5   files=64    ly=32  vwd=0
+   t=75.0   files=68    ly=32  vwd=0
+   t=76.2   files=108   ly=32  vwd=0
+   t=77.4   files=144   ly=32  vwd=0
+   t=78.6   files=152   ly=32  vwd=0
+   t=79.8   files=176   ly=32  vwd=0
+   t=81.0   files=296   ly=32  vwd=0
+   t=82.2   files=555   ly=32  vwd=0
+   t=83.4   files=636   ly=32  vwd=0
+   t=84.6   files=680   ly=32  vwd=0
+   t=85.8   files=801   ly=32  vwd=0
+   t=87.0   files=1040  ly=32  vwd=0
+   t=88.2   files=1252  ly=32  vwd=0
+   t=89.4   files=1263  ly=32  vwd=0
+   t=207.2  files=1265  ly=32  vwd=1
+   t=208.4  files=1267  ly=32  vwd=2
+   t=209.6  files=1270  ly=32  vwd=4
+   t=210.8  files=1273  ly=32  vwd=5
+   t=212.0  files=1275  ly=32  vwd=6
+   t=213.2  files=1277  ly=32  vwd=7
+   t=214.4  files=1279  ly=32  vwd=8
+   t=215.6  files=1281  ly=32  vwd=9
+   t=216.8  files=1283  ly=32  vwd=10
+   t=218.0  files=1285  ly=32  vwd=11
+   steps: [(12.1, 7), (44.1, 10), (74.1, 12), (190.0, 13), (205.0, 16)]
+== emulated B_fill ==
+   t=0.0    files=0     ly=0   vwd=0
+   t=13.3   files=64    ly=32  vwd=0
+   t=74.3   files=65    ly=32  vwd=0
+   t=75.5   files=75    ly=32  vwd=0
+   t=206.7  files=77    ly=32  vwd=1
+   t=207.9  files=79    ly=32  vwd=2
+   t=209.1  files=81    ly=32  vwd=3
+   t=210.3  files=83    ly=32  vwd=4
+   t=211.4  files=85    ly=32  vwd=5
+   t=212.6  files=89    ly=32  vwd=7
+   t=213.8  files=91    ly=32  vwd=8
+   t=215.0  files=93    ly=32  vwd=9
+   t=216.2  files=95    ly=32  vwd=10
+   t=217.4  files=97    ly=32  vwd=11
+   steps: [(12.1, 7), (44.0, 10), (74.1, 12), (190.2, 13), (205.2, 16)]

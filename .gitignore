@@ -16,15 +16,13 @@ holo-card/
 归档/
 test/
 _analysis/
-_work/out_psd/
-_work/realcap/
-_work/captest*/
-_work/langtest/
-_work/交付_zu06记录版/
-_work/交付_抓包版/
-_work/交付_记录版/
 *.tif
 *.gjs
+
+# Ignore messy intermediate experimental outputs in _work, keep only official delivery
+_work/*
+!_work/交付_10.1/
+!_work/PSDTO3D_10.1_2026-11-26.zip
 
 # OS & Editor
 Thumbs.db
