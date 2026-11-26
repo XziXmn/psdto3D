@@ -1,0 +1,5 @@
+LIBRARY wnaspi32
+EXPORTS
+GetASPI32SupportInfo
+SendASPI32Command
+GetASPI32DLLVersion

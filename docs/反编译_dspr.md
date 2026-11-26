@@ -1,0 +1,73 @@
+# dspr.dll 反编译说明
+
+> 同族但代码差异极大的一个成员，属于早期分支。
+
+> 本文的数字全部取自 `_analysis/baseline.json`（阶段 A 基线），与 `_analysis/coverage.tsv` 同源，可用 `python -I _analysis/gen_module_pages.py` 重新生成。
+
+---
+
+## 1. 模块标识（A 级）
+
+| 项 | 值 |
+|---|---|
+| 源路径 | `Psdto3d/dspr.dll` |
+| SHA-256 | `813460ca23868465cb9809ef032e3b6f5fef807b342899b94f471e5d01c45be8` |
+| 文件大小 | 781,312 B |
+| CODE 段 | 671,744 B |
+| 级别 | P1 |
+
+## 2. 导出与窗体（A 级，PE 资源直接读出）
+
+- 导出数：**2**（`readpsd`、`writepsd`）
+- DFM 窗体数：**0**
+
+## 3. 单元结构（B/C 级，来自 PACKAGEINFO 扫描）
+
+| 项 | 值 |
+|---|---|
+| 候选单元条目 | 54 |
+| 业务单元 | **32** |
+| 库单元 | 22 |
+| 置信度 | C |
+
+业务单元：`mdspr`、`Rjpeg`、`Consts`、`SysInit`、`KWindows`、`UTypes`、`SysConst`、`WinSpool`、`FlatSB`、`StdActns`、`YStrUtils`、`MultiMon`、`Contnrs`、`Imm`、`Dlgs`、`RegStr`、`UrlMon`、`WinHelpViewer`、`RHelpIntfs`、`ComStrs`、`ExtActns`、`SyncObjs`、`RichEdit`、`ListActns`、`LSoftKey`、`GraphicColor`、`GraphicStrings`、`GraphicEx`、`MZLib`、`GraphicCompression`、`lJPG`、`ShareMem`
+
+## 4. 语料与覆盖率
+
+**本模块未建语料。** 原因：未建语料（该版本只做 PE/资源级比对，或非 P0/P1 分析目标）
+
+因此本文没有函数级反编译正文（D 阶段要求的那种精读）。但第 4.5 节给出 IDR 恢复的**符号级**数据（导出、单元、命名函数）。
+
+## 4.5 IDR 符号级数据（B 级，知识库恢复）
+
+| 项 | 值 |
+|---|---|
+| IDR 名表条目 | 3,821 |
+| 其中有真名 | 3,153 |
+| 涉及单元 | 67 |
+| 单元表条目 | 68 |
+
+导出（在 IDR 名表中定位到的）：
+
+- `0x004A224C` `{dspr}` readpsd; stdcall;
+- `0x004A3804` `{dspr}` writepsd; stdcall;
+
+命名函数数（去占位）：**3153**。
+完整的族内关系见 `docs/反编译_PSD读写.md` §3.9 与 `docs/反编译_其余模块.md` §1.2c。
+
+## 5. 证据等级说明
+
+| 等级 | 含义 | 本文用到的部分 |
+|---|---|---|
+| A | 直接从二进制/PE 结构读出，可逐字节复核 | 第 1、2 节 |
+| B | 经工具解析 + 交叉验证 | 第 3 节（单元）、第 4 节（覆盖率） |
+| C | 单一路径推断，未交叉验证 | 第 3 节里的库/业务划分 |
+| D | 猜测，不得作为补丁依据 | 本文未使用 |
+
+## 6. 复现
+
+```bash
+python -I _analysis/gen_baseline.py      # 重算哈希/导出/DFM/覆盖率
+python -I _analysis/gen_corpora.py --check
+python -I _analysis/gen_module_pages.py  # 重新生成本页
+```

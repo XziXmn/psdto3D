@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://psdto3d.local/schema/project-v1.json",
+  "title": "PSDTO3D NG project",
+  "description": "Portable project format for the reworked lenticular 3D generator. All paths are relative to this file; the PSD is identified by digest so a wrong pairing is detected instead of crashing.",
+  "type": "object",
+  "required": ["format", "version", "source", "lens", "output", "layers"],
+  "additionalProperties": false,
+  "properties": {
+    "format": { "const": "psdto3d-ng-project" },
+    "version": { "const": 1 },
+    "source": {
+      "type": "object",
+      "required": ["psd", "sha256", "width", "height", "layerCount"],
+      "additionalProperties": false,
+      "properties": {
+        "psd": { "type": "string", "description": "relative path, e.g. sample/3d2.psd" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 },
+        "layerCount": { "type": "integer", "minimum": 1 },
+        "colorMode": { "enum": ["rgb", "cmyk", "gray", "lab", "bitmap"] },
+        "bitsPerChannel": { "type": "integer", "enum": [1, 8, 16, 32] }
+      }
+    },
+    "lens": {
+      "type": "object",
+      "required": ["lpi", "views", "depth"],
+      "additionalProperties": false,
+      "properties": {
+        "lpi": { "type": "number", "exclusiveMinimum": 0, "description": "lenticular lens pitch" },
+        "views": { "type": "integer", "minimum": 2, "description": "Angles in the legacy UI; must be >= 1" },
+        "depth": { "type": "number" },
+        "direction": { "enum": ["vertical", "horizontal"], "default": "vertical" },
+        "offset": { "type": "number", "default": 0, "description": "global phase offset in output pixels" }
+      }
+    },
+    "output": {
+      "type": "object",
+      "required": ["dpi", "width", "height", "color"],
+      "additionalProperties": false,
+      "properties": {
+        "dpi": { "type": "number", "exclusiveMinimum": 0 },
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 },
+        "color": { "enum": ["rgb", "cmyk", "gray"] },
+        "tiffCompression": { "enum": ["none", "lzw", "deflate", "packbits"], "default": "lzw" },
+        "interlaceOrder": { "enum": ["left-to-right", "right-to-left"], "default": "left-to-right" }
+      }
+    },
+    "layers": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["index", "angle", "group", "scale"],
+        "additionalProperties": false,
+        "properties": {
+          "index": { "type": "integer", "minimum": 0 },
+          "name": { "type": "string" },
+          "angle": { "type": "number", "description": "legacy field 1 of the layer row" },
+          "group": { "type": "integer", "minimum": 0, "description": "legacy field 2 of the layer row" },
+          "scale": { "type": "number", "exclusiveMinimum": 0 },
+          "offset": { "type": "integer", "description": "legacy per-layer integer (row 9..8+N)" },
+          "visible": { "type": "boolean", "default": true }
+        }
+      }
+    },
+    "curves": {
+      "type": "array",
+      "description": "legacy free-draw blocks",
+      "items": {
+        "type": "object",
+        "required": ["layer", "group", "sub", "points"],
+        "additionalProperties": false,
+        "properties": {
+          "layer": { "type": "integer", "minimum": 0 },
+          "group": { "type": "integer", "minimum": 0 },
+          "sub": { "type": "integer", "minimum": 0 },
+          "points": {
+            "type": "array",
+            "items": { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2 }
+          }
+        }
+      }
+    },
+    "meta": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "title": { "type": "string" },
+        "author": { "type": "string" },
+        "savedAt": { "type": "string", "format": "date-time" },
+        "legacy": {
+          "type": "object",
+          "description": "origin info when converted from .tw3d2",
+          "properties": {
+            "file": { "type": "string" },
+            "sha256": { "type": "string" },
+            "timestamp": { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}

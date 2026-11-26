@@ -1,0 +1,36 @@
+# Python & Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Temporary & Logs
+*.log
+_dlg*.txt
+*.tmp
+*.orig
+*.bak*
+
+# Large test assets & archives (>100MB GitHub limit)
+1114/
+holo-card/
+归档/
+test/
+_analysis/
+_work/out_psd/
+_work/realcap/
+_work/captest*/
+_work/langtest/
+_work/交付_zu06记录版/
+_work/交付_抓包版/
+_work/交付_记录版/
+*.tif
+*.gjs
+
+# OS & Editor
+Thumbs.db
+.DS_Store
+.idea/
+.vscode/
+
+# Build artifacts in cmykdrop
+cmykdrop/*.o

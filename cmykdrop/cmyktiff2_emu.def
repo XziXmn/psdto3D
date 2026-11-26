@@ -1,0 +1,9 @@
+LIBRARY cmyktiff2
+EXPORTS
+  JpgToBmp     = cmyktiff2_real.JpgToBmp
+  bmptotiff    = cmyktiff2_real.bmptotiff
+  gettiffinfo  = cmyktiff2_real.gettiffinfo
+  mergtotiff   = cmyktiff2_real.mergtotiff
+  rgbtocmykbmp = cmyktiff2_real.rgbtocmykbmp
+  savetiff00   = cmyktiff2_real.savetiff00
+  tifftobmp    = cmyktiff2_real.tifftobmp
