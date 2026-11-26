@@ -731,6 +731,7 @@ static DWORD g_auto_cache_last_sz = 0;
 static int g_auto_cache_stable_hits = 0;
 static int g_auto_cache_vw_last = 0;
 static int g_auto_cache_vw_stable = 0;
+static volatile int g_main_closing = 0;
 static WNDPROC g_old_main_wndproc = NULL;
 
 static int count_preview_vw(void)
@@ -781,8 +782,39 @@ static int dismiss_app_error_dialog(void)
 
 static LRESULT CALLBACK MainSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
+    if (msg == WM_CLOSE) {
+        g_main_closing = 1;
+        g_auto_cache_mode = 0;
+        g_auto_cache_state = 0;
+        g_pending_cmd_after_cache = 0;
+    } else if (msg == WM_DESTROY || msg == WM_NCDESTROY) {
+        WNDPROC old = g_old_main_wndproc;
+        g_main_closing = 1;
+        g_auto_cache_mode = 0;
+        g_auto_cache_state = 0;
+        g_pending_cmd_after_cache = 0;
+        if (old) {
+            SetWindowLongA(hwnd, GWL_WNDPROC, (LONG)old);
+            g_old_main_wndproc = NULL;
+            return CallWindowProcA(old, hwnd, msg, wParam, lParam);
+        }
+        return DefWindowProcA(hwnd, msg, wParam, lParam);
+    }
     if (msg == WM_COMMAND) {
         WORD cmd = LOWORD(wParam);
+        if (cmd == 16 && g_auto_cache_state == 0 && count_preview_vw() <= 0) {
+            CreateDirectoryA("C:\\ok3dtemp", NULL);
+            g_pending_cmd_after_cache = 16;
+            g_auto_cache_mode = 0;
+            g_auto_cache_state = 1;
+            g_auto_cache_start_tick = GetTickCount();
+            g_auto_cache_phase_tick = GetTickCount();
+            g_auto_cache_vw_last = 0;
+            g_auto_cache_vw_stable = 0;
+            note("AUTO_CACHE: 无预览直导TIFF(cmd=16)，先静默启动预览(cmd=12)...");
+            PostMessageA(hwnd, WM_COMMAND, 12, 0);
+            return 0;
+        }
         if ((cmd == 17 || cmd == 18) && g_auto_cache_state == 0) {
             int views = psd_count_views("C:\\ok3dtemp\\");
             if (views <= 0) {
@@ -811,7 +843,8 @@ static LRESULT CALLBACK MainSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
             }
         }
     }
-    return CallWindowProcA(g_old_main_wndproc, hwnd, msg, wParam, lParam);
+    WNDPROC old = g_old_main_wndproc;
+    return old ? CallWindowProcA(old, hwnd, msg, wParam, lParam) : DefWindowProcA(hwnd, msg, wParam, lParam);
 }
 
 int __stdcall writepsd_shim(const char *file, const char *dir,
@@ -3038,23 +3071,29 @@ static DWORD WINAPI load_watch(LPVOID p)
     (void)p;
     memset(seen, 0, sizeof(seen));
     for (;;) {
+        if (g_main_closing) {
+            note("AUTO_CACHE: 主窗体关闭，退出监控线程");
+            return 0;
+        }
         if (cfg_on("arrwatch", 0, "_arrwatch.txt"))
             arrwatch_tick();
         startup_cleanup();
         localize_dialogs();
 
-        /* 持续保持关键导出菜单项使能 (N26: 导出TIFF, PSD1: 导出PSD, N28: 导出GIF) */
-        void **p_app = (void **)0x0051FC18;
-        if (p_app && !IsBadReadPtr(p_app, 4) && *p_app && !IsBadReadPtr(*p_app, 0x40)) {
-            char *app = (char *)*p_app;
-            char *form = *(char **)(app + 0x34);
-            if (form && !IsBadReadPtr(form, 0x500)) {
-                char *n26  = *(char **)(form + 0x4D8);
-                char *psd1 = *(char **)(form + 0x4DC);
-                char *n28  = *(char **)(form + 0x4E0);
-                if (n26 && !IsBadWritePtr(n26 + 0x39, 1)) *(unsigned char *)(n26 + 0x39) = 1;
-                if (psd1 && !IsBadWritePtr(psd1 + 0x39, 1)) *(unsigned char *)(psd1 + 0x39) = 1;
-                if (n28 && !IsBadWritePtr(n28 + 0x39, 1)) *(unsigned char *)(n28 + 0x39) = 1;
+        /* 持续保持关键导出菜单项与工具栏按钮 VCL FEnabled 为 1 */
+        {
+            char *form = NULL;
+            if (!IsBadReadPtr((void *)0x005230B8, 4))
+                form = *(char **)0x005230B8;
+            if (form && !IsBadReadPtr(form, 0x620)) {
+                char *n7    = *(char **)(form + 0x470); /* 输出 tiff (id=16) */
+                char *psd1  = *(char **)(form + 0x4DC); /* 输出 PSD  (id=17) */
+                char *gif1  = *(char **)(form + 0x578); /* 输出 Gif  (id=18) */
+                char *btn29 = *(char **)(form + 0x3F4); /* SpeedButton29 (Export tiff) */
+                if (n7    && !IsBadWritePtr(n7 + 0x39, 1))    *(unsigned char *)(n7 + 0x39) = 1;
+                if (psd1  && !IsBadWritePtr(psd1 + 0x39, 1))  *(unsigned char *)(psd1 + 0x39) = 1;
+                if (gif1  && !IsBadWritePtr(gif1 + 0x39, 1))  *(unsigned char *)(gif1 + 0x39) = 1;
+                if (btn29 && !IsBadWritePtr(btn29 + 0x57, 1)) *(unsigned char *)(btn29 + 0x57) = 1;
             }
         }
         HWND hmain = FindWindowA("TForm1", NULL);
@@ -3088,20 +3127,28 @@ static DWORD WINAPI load_watch(LPVOID p)
                     }
                 } else if (g_auto_cache_state == 2) {
                     if (GetTickCount() - g_auto_cache_phase_tick >= 800) {
-                        g_auto_cache_mode = 1;
-                        g_auto_cache_state = 3;
-                        g_auto_cache_phase_tick = GetTickCount();
-                        note("AUTO_CACHE: 启动静默切片渲染(cmd=16) -> %s", g_auto_cache_tif_path);
-                        PostMessageA(hmain, WM_COMMAND, 16, 0);
+                        if (g_pending_cmd_after_cache == 16) {
+                            g_auto_cache_mode = 0;
+                            g_auto_cache_state = 0;
+                            g_pending_cmd_after_cache = 0;
+                            note("AUTO_CACHE: 预览已停，正常续发导出TIFF(cmd=16)弹出保存框");
+                            PostMessageA(hmain, WM_COMMAND, 16, 0);
+                        } else {
+                            g_auto_cache_mode = 1;
+                            g_auto_cache_state = 3;
+                            g_auto_cache_phase_tick = GetTickCount();
+                            note("AUTO_CACHE: 启动静默切片渲染(cmd=16) -> %s", g_auto_cache_tif_path);
+                            PostMessageA(hmain, WM_COMMAND, 16, 0);
+                        }
                     }
                 } else if (g_auto_cache_state == 3) {
                     WIN32_FILE_ATTRIBUTE_DATA fad;
                     const char *tp = g_auto_cache_tif_path[0] ? g_auto_cache_tif_path : "C:\\ok3dtemp\\_auto_cache.tif";
+                    dismiss_app_error_dialog();
                     if (GetFileAttributesExA(tp, GetFileExInfoStandard, &fad)) {
                         DWORD sz = fad.nFileSizeLow;
                         int views = psd_count_views("C:\\ok3dtemp\\");
                         if (sz > 1000 && views > 0) {
-                            dismiss_app_error_dialog();
                             if (sz == g_auto_cache_last_sz) g_auto_cache_stable_hits++;
                             else { g_auto_cache_last_sz = sz; g_auto_cache_stable_hits = 0; }
                             if (g_auto_cache_stable_hits >= 4) {
@@ -3146,7 +3193,7 @@ static DWORD WINAPI load_watch(LPVOID p)
                 }
             }
         }
-        if (cfg_on("layers_up", 1, "_layers_up.txt") ||
+        if (cfg_on("layers_up", 0, "_layers_up.txt") ||
             cfg_on("layerstr", 0, "_layerstr.txt"))
             alloc_layer_strs();
         if (cfg_on("selfprobe", 0, "_selfprobe.txt"))
@@ -3219,6 +3266,22 @@ static DWORD WINAPI load_watch(LPVOID p)
                         VirtualProtect(p_n26, 2, oldp5, &oldp5);
                         FlushInstructionCache(GetCurrentProcess(), p_n26, 2);
                         note("NATIVE N26Click guard patched to NOP at %p", p_n26);
+                    }
+                }
+                /* FormClose 写完配置后将 [0x5230B4] 清零而不调用 DynArrayClear，兼顾消除退出与 Finalization 报错 */
+                unsigned char *p_fc = (unsigned char *)((char *)he + 0xFF66B);
+                if (p_fc[0] == 0x6A && p_fc[1] == 0x00 && p_fc[2] == 0xB8 &&
+                    p_fc[3] == 0xB4 && p_fc[4] == 0x30 && p_fc[5] == 0x52 && p_fc[6] == 0x00 &&
+                    p_fc[23] == 0x83 && p_fc[24] == 0xC4 && p_fc[25] == 0x04) {
+                    DWORD oldp6;
+                    if (VirtualProtect(p_fc, 26, PAGE_EXECUTE_READWRITE, &oldp6)) {
+                        /* mov dword ptr [0x5230B4], 0 (10 bytes) + 16 * nop */
+                        static const unsigned char z_b4[10] = { 0xC7,0x05,0xB4,0x30,0x52,0x00,0x00,0x00,0x00,0x00 };
+                        memcpy(p_fc, z_b4, 10);
+                        memset(p_fc + 10, 0x90, 16);
+                        VirtualProtect(p_fc, 26, oldp6, &oldp6);
+                        FlushInstructionCache(GetCurrentProcess(), p_fc, 26);
+                        note("EXIT_FIX: FormClose [5230B4] := nil patched at %p", p_fc);
                     }
                 }
                 writepsd_callsite_done = 1;
@@ -3458,6 +3521,8 @@ BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID reserved)
 {
     (void)hinst; (void)reserved;
     if (reason == DLL_PROCESS_ATTACH) {
+        HMODULE hpin = NULL;
+        GetModuleHandleExA(0x00000004 | 0x00000001, (LPCSTR)DllMain, &hpin); /* FROM_ADDRESS | PIN */
         dongle_spy_install();
         CreateThread(NULL, 0, zu06_watch, NULL, 0, NULL);
 
