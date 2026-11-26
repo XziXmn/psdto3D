@@ -721,6 +721,98 @@ __attribute__((used)) typedef int (__stdcall *PF_WRITEPSD)(const char *, const c
 static PF_WRITEPSD o_writepsd;
 
 static char g_native_file[MAX_PATH], g_native_dir[MAX_PATH];
+static volatile int g_auto_cache_mode = 0;       /* 1 = e_gsfn 静默注入临时 tif 路径 */
+static volatile int g_auto_cache_state = 0;      /* 0=空闲, 1=等待预览生成vw*, 2=等待停止预览后发16, 3=等待切片与tif稳定 */
+static volatile int g_pending_cmd_after_cache = 0;
+static volatile DWORD g_auto_cache_start_tick = 0;
+static volatile DWORD g_auto_cache_phase_tick = 0;
+static char g_auto_cache_tif_path[MAX_PATH];
+static DWORD g_auto_cache_last_sz = 0;
+static int g_auto_cache_stable_hits = 0;
+static int g_auto_cache_vw_last = 0;
+static int g_auto_cache_vw_stable = 0;
+static WNDPROC g_old_main_wndproc = NULL;
+
+static int count_preview_vw(void)
+{
+    int i, n = 0;
+    for (i = 1; i <= 64; i++) {
+        char p[MAX_PATH];
+        wsprintfA(p, "C:\\ok3dtemp\\vw%d.bmp", i);
+        if (GetFileAttributesA(p) == INVALID_FILE_ATTRIBUTES) break;
+        n = i;
+    }
+    return n;
+}
+
+struct err_enum_ctx {
+    DWORD pid;
+    int closed;
+};
+
+static BOOL CALLBACK dismiss_app_err_cb(HWND w, LPARAM lp)
+{
+    struct err_enum_ctx *ctx = (struct err_enum_ctx *)lp;
+    DWORD wpid = 0;
+    char cls[64], title[128];
+    if (!IsWindowVisible(w)) return TRUE;
+    GetWindowThreadProcessId(w, &wpid);
+    if (wpid != ctx->pid) return TRUE;
+    cls[0] = 0; title[0] = 0;
+    GetClassNameA(w, cls, sizeof(cls));
+    GetWindowTextA(w, title, sizeof(title));
+    if (lstrcmpA(cls, "#32770") == 0 && lstrcmpA(title, "Application Error") == 0) {
+        PostMessageA(w, WM_COMMAND, IDOK, 0);
+        PostMessageA(w, WM_CLOSE, 0, 0);
+        ctx->closed++;
+        note("AUTO_CACHE: 自动关闭收尾弹窗 hwnd=%p", w);
+    }
+    return TRUE;
+}
+
+static int dismiss_app_error_dialog(void)
+{
+    struct err_enum_ctx ctx;
+    ctx.pid = GetCurrentProcessId();
+    ctx.closed = 0;
+    EnumWindows(dismiss_app_err_cb, (LPARAM)&ctx);
+    return ctx.closed;
+}
+
+static LRESULT CALLBACK MainSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    if (msg == WM_COMMAND) {
+        WORD cmd = LOWORD(wParam);
+        if ((cmd == 17 || cmd == 18) && g_auto_cache_state == 0) {
+            int views = psd_count_views("C:\\ok3dtemp\\");
+            if (views <= 0) {
+                CreateDirectoryA("C:\\ok3dtemp", NULL);
+                wsprintfA(g_auto_cache_tif_path, "C:\\ok3dtemp\\_auto_cache_%lu.tif", GetTickCount());
+                g_pending_cmd_after_cache = cmd;
+                g_auto_cache_start_tick = GetTickCount();
+                g_auto_cache_last_sz = 0;
+                g_auto_cache_stable_hits = 0;
+                g_auto_cache_vw_last = 0;
+                g_auto_cache_vw_stable = 0;
+                if (count_preview_vw() <= 0) {
+                    g_auto_cache_state = 1;
+                    g_auto_cache_phase_tick = GetTickCount();
+                    note("AUTO_CACHE: 零预览零切片触发(cmd=%d)，先静默启动预览(cmd=12)...", cmd);
+                    PostMessageA(hwnd, WM_COMMAND, 12, 0);
+                } else {
+                    g_auto_cache_mode = 1;
+                    g_auto_cache_state = 3;
+                    g_auto_cache_phase_tick = GetTickCount();
+                    note("AUTO_CACHE: 已有预览但零切片(cmd=%d)，直接静默触发切片渲染(cmd=16) -> %s",
+                         cmd, g_auto_cache_tif_path);
+                    PostMessageA(hwnd, WM_COMMAND, 16, 0);
+                }
+                return 0;
+            }
+        }
+    }
+    return CallWindowProcA(g_old_main_wndproc, hwnd, msg, wParam, lParam);
+}
 
 int __stdcall writepsd_shim(const char *file, const char *dir,
                            int a3, int a4, int a5, int a6,
@@ -735,8 +827,13 @@ int __stdcall writepsd_shim(const char *file, const char *dir,
     note("NATIVE writepsd: file=%s dir=%s layers=%d w=%d h=%d spp=%d", 
          file ? file : "(null)", dir ? dir : "(null)", layers, w, h, spp);
 
-    if (file && dir && layers > 0 && layers <= 64 && w > 0 && h > 0)
-        psd_assemble(g_native_file, g_native_dir, w, h, layers);
+    if (file && dir && layers > 0 && layers <= 64 && w > 0 && h > 0) {
+        int avail = psd_count_views(dir);
+        note("NATIVE writepsd: 当前可用切片数=%d (layers=%d)", avail, layers);
+        psd_assemble(g_native_file, g_native_dir, w, h, avail > 0 ? avail : layers);
+        DeleteFileA("C:\\ok3dtemp\\_auto_cache.tif");
+        if (g_auto_cache_tif_path[0]) DeleteFileA(g_auto_cache_tif_path);
+    }
 
     return r;
 }
@@ -758,6 +855,14 @@ static BOOL WINAPI e_gsfn(void *p)
     if (capture_mode() && o_gsfn) return ((BOOL (WINAPI *)(void *))o_gsfn)(p);
     char *file = *(char **)((char *)p + 0x1C);
     unsigned maxfile = *(unsigned *)((char *)p + 0x20);
+
+    /* 自动缓存模式：静默返回临时 TIFF 路径供切片管线运行，不弹窗 */
+    if (g_auto_cache_mode) {
+        const char *tp = g_auto_cache_tif_path[0] ? g_auto_cache_tif_path : "C:\\ok3dtemp\\_auto_cache.tif";
+        if (file && maxfile) lstrcpynA(file, tp, maxfile);
+        note("AUTO_CACHE: e_gsfn 静默注入临时路径: %s", file ? file : "(null)");
+        return TRUE;
+    }
     /* 保存框不该继承 PSD 的 ASCII 别名（会跑到 ok3dtemp 且名字是哈希） */
     if (file && maxfile && g_alias_src[0]) {   /* alias_keep_suffix */
         const char *bn = file, *q = file;
@@ -2252,7 +2357,7 @@ imports_done:
     sbp_arm_checked((unsigned long)base + 0x10B070, 0x53);  /* 0x50B070 GATE1 entry */
     sbp_arm_checked((unsigned long)base + 0x10B07E, 0x3C);  /* 0x50B07E cmp al,1 */
     sbp_arm_checked((unsigned long)base + 0x10B086, 0xE8);  /* 0x50B086 call 0x505A44 */
-    sbp_arm_checked((unsigned long)base + 0x105A66, 0x8B);  /* 0x505A66 post-GATE1 */
+    /* sbp_arm_checked((unsigned long)base + 0x105A66, 0x8B); */  /* 0x505A66 post-GATE1 */
     sbp_arm_checked((unsigned long)base + 0x3265E, 0x8B);   /* 0x43265E Execute entry */
     sbp_arm_checked((unsigned long)base + 0x10B073, 0x8B);  /* 0x50B073 load btn obj */
 
@@ -2954,18 +3059,81 @@ static DWORD WINAPI load_watch(LPVOID p)
         }
         HWND hmain = FindWindowA("TForm1", NULL);
         if (hmain) {
-            char title[512];
-            if (GetWindowTextA(hmain, title, sizeof(title)) > 0) {
-                if (strncmp(title, "Psdto3d 10", 10) == 0 && !strstr(title, "2026.11.26")) {
-                    char new_title[512];
-                    const char *rest = title + 10;
-                    while (*rest && (*rest == '.' || *rest == '1' || *rest == ' ')) rest++;
-                    if (*rest) {
-                        wsprintfA(new_title, "Psdto3d 10.1 (2026.11.26) - %s", rest);
-                    } else {
-                        lstrcpyA(new_title, "Psdto3d 10.1 (2026.11.26)");
+            LONG cur_proc = GetWindowLongA(hmain, GWL_WNDPROC);
+            if (cur_proc && cur_proc != (LONG)MainSubclassProc) {
+                g_old_main_wndproc = (WNDPROC)cur_proc;
+                SetWindowLongA(hmain, GWL_WNDPROC, (LONG)MainSubclassProc);
+                note("AUTO_CACHE: 主窗口子类化挂钩完成 (hwnd=%p, old=%p)", hmain, g_old_main_wndproc);
+            }
+            if (g_auto_cache_state != 0) {
+                DWORD elapsed = GetTickCount() - g_auto_cache_start_tick;
+                if (elapsed > 180000) {
+                    note("AUTO_CACHE: 自动切片渲染超时 (%lu ms)，重置状态", elapsed);
+                    g_auto_cache_mode = 0;
+                    g_auto_cache_state = 0;
+                    g_pending_cmd_after_cache = 0;
+                    if (g_auto_cache_tif_path[0]) DeleteFileA(g_auto_cache_tif_path);
+                } else if (g_auto_cache_state == 1) {
+                    int vwc = count_preview_vw();
+                    DWORD p_el = GetTickCount() - g_auto_cache_phase_tick;
+                    if (vwc > 0) {
+                        if (vwc == g_auto_cache_vw_last) g_auto_cache_vw_stable++;
+                        else { g_auto_cache_vw_last = vwc; g_auto_cache_vw_stable = 0; }
                     }
-                    SetWindowTextA(hmain, new_title);
+                    if ((vwc > 0 && g_auto_cache_vw_stable >= 8 && p_el >= 1800) || p_el >= 8000) {
+                        note("AUTO_CACHE: 预览切片就绪 (vw=%d)，发送停止预览(cmd=13)...", vwc);
+                        PostMessageA(hmain, WM_COMMAND, 13, 0);
+                        g_auto_cache_state = 2;
+                        g_auto_cache_phase_tick = GetTickCount();
+                    }
+                } else if (g_auto_cache_state == 2) {
+                    if (GetTickCount() - g_auto_cache_phase_tick >= 800) {
+                        g_auto_cache_mode = 1;
+                        g_auto_cache_state = 3;
+                        g_auto_cache_phase_tick = GetTickCount();
+                        note("AUTO_CACHE: 启动静默切片渲染(cmd=16) -> %s", g_auto_cache_tif_path);
+                        PostMessageA(hmain, WM_COMMAND, 16, 0);
+                    }
+                } else if (g_auto_cache_state == 3) {
+                    WIN32_FILE_ATTRIBUTE_DATA fad;
+                    const char *tp = g_auto_cache_tif_path[0] ? g_auto_cache_tif_path : "C:\\ok3dtemp\\_auto_cache.tif";
+                    if (GetFileAttributesExA(tp, GetFileExInfoStandard, &fad)) {
+                        DWORD sz = fad.nFileSizeLow;
+                        int views = psd_count_views("C:\\ok3dtemp\\");
+                        if (sz > 1000 && views > 0) {
+                            dismiss_app_error_dialog();
+                            if (sz == g_auto_cache_last_sz) g_auto_cache_stable_hits++;
+                            else { g_auto_cache_last_sz = sz; g_auto_cache_stable_hits = 0; }
+                            if (g_auto_cache_stable_hits >= 4) {
+                                int next_cmd = g_pending_cmd_after_cache;
+                                dismiss_app_error_dialog();
+                                DeleteFileA(tp);
+                                g_auto_cache_mode = 0;
+                                g_auto_cache_state = 0;
+                                g_pending_cmd_after_cache = 0;
+                                note("AUTO_CACHE: 切片渲染完成 (tif=%lu B, views=%d)，自动续发命令 %d",
+                                     sz, views, next_cmd);
+                                Sleep(400);
+                                if (next_cmd) PostMessageA(hmain, WM_COMMAND, next_cmd, 0);
+                            }
+                        }
+                    }
+                }
+            }
+            if (g_auto_cache_state == 0) {
+                char title[512];
+                if (GetWindowTextA(hmain, title, sizeof(title)) > 0) {
+                    if (strncmp(title, "Psdto3d 10", 10) == 0 && !strstr(title, "2026.11.26")) {
+                        char new_title[512];
+                        const char *rest = title + 10;
+                        while (*rest && (*rest == '.' || *rest == '1' || *rest == ' ')) rest++;
+                        if (*rest) {
+                            wsprintfA(new_title, "Psdto3d 10.1 (2026.11.26) - %s", rest);
+                        } else {
+                            lstrcpyA(new_title, "Psdto3d 10.1 (2026.11.26)");
+                        }
+                        SetWindowTextA(hmain, new_title);
+                    }
                 }
             }
             HMENU hm = GetMenu(hmain);
