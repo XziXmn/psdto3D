@@ -721,71 +721,7 @@ __attribute__((used)) typedef int (__stdcall *PF_WRITEPSD)(const char *, const c
 static PF_WRITEPSD o_writepsd;
 
 static char g_native_file[MAX_PATH], g_native_dir[MAX_PATH];
-static volatile int g_auto_cache_mode = 0;       /* 1 = e_gsfn 一次性静默注入临时 tif 路径后立即清零 */
-static volatile int g_inject_user_save = 0;      /* 1 = e_gsfn 一次性静默注入用户已选的 psd/gif 路径后立即清零 */
-static volatile int g_auto_cache_state = 0;      /* 0=空闲, 1=等待后台切片与临时tif稳定后自动续发 */
-static volatile int g_pending_cmd_after_cache = 0;
-static volatile DWORD g_auto_cache_start_tick = 0;
-static char g_auto_cache_tif_path[MAX_PATH];
-static char g_pending_user_save_path[MAX_PATH];
-static DWORD g_auto_cache_last_sz = 0;
-static int g_auto_cache_stable_hits = 0;
 static volatile int g_main_closing = 0;
-static WNDPROC g_old_main_wndproc = NULL;
-
-typedef struct {
-    DWORD lStructSize;
-    HWND  hwndOwner;
-    HINSTANCE hInstance;
-    LPCSTR lpstrFilter;
-    LPSTR  lpstrCustomFilter;
-    DWORD  nMaxCustFilter;
-    DWORD  nFilterIndex;
-    LPSTR  lpstrFile;
-    DWORD  nMaxFile;
-    LPSTR  lpstrFileTitle;
-    DWORD  nMaxFileTitle;
-    LPCSTR lpstrInitialDir;
-    LPCSTR lpstrTitle;
-    DWORD  Flags;
-    WORD   nFileOffset;
-    WORD   nFileExtension;
-    LPCSTR lpstrDefExt;
-    LPARAM lCustData;
-    void  *lpfnHook;
-    LPCSTR lpTemplateName;
-} EMU_OFNA;
-
-static int prompt_user_save_path(HWND hwnd, WORD cmd, char *out_path, int out_cap)
-{
-    EMU_OFNA ofn;
-    BOOL (WINAPI *fn_gsfn)(void *) = NULL;
-    HMODULE hc = GetModuleHandleA("comdlg32.dll");
-    if (!hc) hc = LoadLibraryA("comdlg32.dll");
-    if (hc) fn_gsfn = (BOOL (WINAPI *)(void *))GetProcAddress(hc, "GetSaveFileNameA");
-    if (!fn_gsfn) fn_gsfn = (BOOL (WINAPI *)(void *))o_gsfn;
-    if (!fn_gsfn) return 0;
-
-    memset(&ofn, 0, sizeof(ofn));
-    out_path[0] = 0;
-    ofn.lStructSize = sizeof(ofn);
-    ofn.hwndOwner   = hwnd;
-    ofn.lpstrFile   = out_path;
-    ofn.nMaxFile    = (DWORD)out_cap;
-    ofn.Flags       = 0x00000002 | 0x00000800 | 0x00000008; /* OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR */
-    if (cmd == 17) {
-        ofn.lpstrFilter = "Photoshop PSD (*.psd)\0*.psd\0All Files (*.*)\0*.*\0";
-        ofn.lpstrTitle  = "Export *.psd";
-        ofn.lpstrDefExt = "psd";
-    } else {
-        ofn.lpstrFilter = "GIF Animation (*.gif)\0*.gif\0All Files (*.*)\0*.*\0";
-        ofn.lpstrTitle  = "Gif save";
-        ofn.lpstrDefExt = "gif";
-    }
-    BOOL ok = fn_gsfn(&ofn);
-    note("AUTO_CACHE: prompt_user_save_path fn=%p ok=%d out=[%s]", (void *)fn_gsfn, (int)ok, out_path);
-    return (ok && out_path[0]) ? 1 : 0;
-}
 
 struct err_enum_ctx {
     DWORD pid;
@@ -807,7 +743,7 @@ static BOOL CALLBACK dismiss_app_err_cb(HWND w, LPARAM lp)
         PostMessageA(w, WM_COMMAND, IDOK, 0);
         PostMessageA(w, WM_CLOSE, 0, 0);
         ctx->closed++;
-        note("AUTO_CACHE: 自动关闭收尾弹窗 hwnd=%p", w);
+        note("AUTO_FIX: 自动关闭收尾弹窗 hwnd=%p", w);
     }
     return TRUE;
 }
@@ -819,62 +755,6 @@ static int dismiss_app_error_dialog(void)
     ctx.closed = 0;
     EnumWindows(dismiss_app_err_cb, (LPARAM)&ctx);
     return ctx.closed;
-}
-
-static LRESULT CALLBACK MainSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
-{
-    if (msg == WM_CLOSE) {
-        g_main_closing = 1;
-        g_auto_cache_mode = 0;
-        g_inject_user_save = 0;
-        g_auto_cache_state = 0;
-        g_pending_cmd_after_cache = 0;
-    } else if (msg == WM_DESTROY || msg == WM_NCDESTROY) {
-        WNDPROC old = g_old_main_wndproc;
-        g_main_closing = 1;
-        g_auto_cache_mode = 0;
-        g_inject_user_save = 0;
-        g_auto_cache_state = 0;
-        g_pending_cmd_after_cache = 0;
-        if (old) {
-            SetWindowLongA(hwnd, GWL_WNDPROC, (LONG)old);
-            g_old_main_wndproc = NULL;
-            return CallWindowProcA(old, hwnd, msg, wParam, lParam);
-        }
-        return DefWindowProcA(hwnd, msg, wParam, lParam);
-    }
-    if (msg == WM_COMMAND) {
-        WORD cmd = LOWORD(wParam);
-        /* cmd 16 (输出tiff) 完全不拦截，0ms 秒弹原生 Export Tiff 保存框！ */
-        if ((cmd == 17 || cmd == 18) && g_auto_cache_state == 0) {
-            int views = psd_count_views("C:\\ok3dtemp\\");
-            if (views <= 0) {
-                g_pending_user_save_path[0] = 0;
-                /* 真实手工操作（无 _dlgsave.txt 队列）时：先立刻弹出保存对话框让用户选路径！ */
-                if (g_nsave == 0) {
-                    if (!prompt_user_save_path(hwnd, cmd, g_pending_user_save_path, MAX_PATH)) {
-                        note("AUTO_CACHE: 用户取消了保存弹窗(cmd=%d)", cmd);
-                        return 0;
-                    }
-                    note("AUTO_CACHE: 用户已选保存路径(cmd=%d): %s", cmd, g_pending_user_save_path);
-                }
-                CreateDirectoryA("C:\\ok3dtemp", NULL);
-                wsprintfA(g_auto_cache_tif_path, "C:\\ok3dtemp\\_auto_cache_%lu.tif", GetTickCount());
-                g_pending_cmd_after_cache = cmd;
-                g_auto_cache_start_tick = GetTickCount();
-                g_auto_cache_last_sz = 0;
-                g_auto_cache_stable_hits = 0;
-                g_auto_cache_mode = 1;
-                g_auto_cache_state = 1;
-                note("AUTO_CACHE: 零切片直导(cmd=%d)，直接静默触发切片渲染(cmd=16) -> %s",
-                     cmd, g_auto_cache_tif_path);
-                PostMessageA(hwnd, WM_COMMAND, 16, 0);
-                return 0;
-            }
-        }
-    }
-    WNDPROC old = g_old_main_wndproc;
-    return old ? CallWindowProcA(old, hwnd, msg, wParam, lParam) : DefWindowProcA(hwnd, msg, wParam, lParam);
 }
 
 int __stdcall writepsd_shim(const char *file, const char *dir,
@@ -894,8 +774,6 @@ int __stdcall writepsd_shim(const char *file, const char *dir,
         int avail = psd_count_views(dir);
         note("NATIVE writepsd: 当前可用切片数=%d (layers=%d)", avail, layers);
         psd_assemble(g_native_file, g_native_dir, w, h, avail > 0 ? avail : layers);
-        DeleteFileA("C:\\ok3dtemp\\_auto_cache.tif");
-        if (g_auto_cache_tif_path[0]) DeleteFileA(g_auto_cache_tif_path);
     }
 
     return r;
@@ -918,25 +796,6 @@ static BOOL WINAPI e_gsfn(void *p)
     if (capture_mode() && o_gsfn) return ((BOOL (WINAPI *)(void *))o_gsfn)(p);
     char *file = *(char **)((char *)p + 0x1C);
     unsigned maxfile = *(unsigned *)((char *)p + 0x20);
-
-    /* 自动缓存模式（一次性消费，命中后立刻清零，绝不卡死劫持后续保存框） */
-    if (g_auto_cache_mode) {
-        const char *tp = g_auto_cache_tif_path[0] ? g_auto_cache_tif_path : "C:\\ok3dtemp\\_auto_cache.tif";
-        g_auto_cache_mode = 0;
-        if (file && maxfile) lstrcpynA(file, tp, maxfile);
-        note("AUTO_CACHE: e_gsfn 静默注入临时路径(已清零): %s", file ? file : "(null)");
-        return TRUE;
-    }
-    /* 用户前置保存框选好的路径（一次性消费，命中后立刻清零） */
-    if (g_inject_user_save) {
-        g_inject_user_save = 0;
-        if (g_pending_user_save_path[0]) {
-            if (file && maxfile) lstrcpynA(file, g_pending_user_save_path, maxfile);
-            note("AUTO_CACHE: e_gsfn 注入用户预选路径(已清零): %s", file ? file : "(null)");
-            g_pending_user_save_path[0] = 0;
-            return TRUE;
-        }
-    }
     /* 保存框不该继承 PSD 的 ASCII 别名（会跑到 ok3dtemp 且名字是哈希） */
     if (file && maxfile && g_alias_src[0]) {   /* alias_keep_suffix */
         const char *bn = file, *q = file;
@@ -3115,9 +2974,10 @@ static DWORD WINAPI load_watch(LPVOID p)
     unsigned char seen[16]; int i;
     (void)p;
     memset(seen, 0, sizeof(seen));
+    static int seen_hmain = 0;
     for (;;) {
         if (g_main_closing) {
-            note("AUTO_CACHE: 主窗体关闭，退出监控线程");
+            note("AUTO_FIX: 主窗体关闭，退出监控线程");
             return 0;
         }
         if (cfg_on("arrwatch", 0, "_arrwatch.txt"))
@@ -3125,70 +2985,41 @@ static DWORD WINAPI load_watch(LPVOID p)
         startup_cleanup();
         localize_dialogs();
 
-        /* 持续保持关键导出菜单项与工具栏按钮 VCL FEnabled 为 1 */
-        {
-            char *form = NULL;
-            if (!IsBadReadPtr((void *)0x005230B8, 4))
-                form = *(char **)0x005230B8;
-            if (form && !IsBadReadPtr(form, 0x620)) {
-                char *n7    = *(char **)(form + 0x470); /* 输出 tiff (id=16) */
-                char *psd1  = *(char **)(form + 0x4DC); /* 输出 PSD  (id=17) */
-                char *gif1  = *(char **)(form + 0x578); /* 输出 Gif  (id=18) */
-                char *btn29 = *(char **)(form + 0x3F4); /* SpeedButton29 (Export tiff) */
-                if (n7    && !IsBadWritePtr(n7 + 0x39, 1))    *(unsigned char *)(n7 + 0x39) = 1;
-                if (psd1  && !IsBadWritePtr(psd1 + 0x39, 1))  *(unsigned char *)(psd1 + 0x39) = 1;
-                if (gif1  && !IsBadWritePtr(gif1 + 0x39, 1))  *(unsigned char *)(gif1 + 0x39) = 1;
-                if (btn29 && !IsBadWritePtr(btn29 + 0x57, 1)) *(unsigned char *)(btn29 + 0x57) = 1;
-            }
-        }
         HWND hmain = FindWindowA("TForm1", NULL);
+        if (seen_hmain && (!hmain || !IsWindow(hmain))) {
+            g_main_closing = 1;
+            note("AUTO_FIX: 主窗体已销毁，退出监控线程");
+            return 0;
+        }
         if (hmain) {
-            LONG cur_proc = GetWindowLongA(hmain, GWL_WNDPROC);
-            if (cur_proc && cur_proc != (LONG)MainSubclassProc) {
-                g_old_main_wndproc = (WNDPROC)cur_proc;
-                SetWindowLongA(hmain, GWL_WNDPROC, (LONG)MainSubclassProc);
-                note("AUTO_CACHE: 主窗口子类化挂钩完成 (hwnd=%p, old=%p)", hmain, g_old_main_wndproc);
-            }
+            seen_hmain = 1;
             /* 静默清理 cmyktiff2_real.DLL 写完 TIFF 收尾可能弹出的 Application Error 弹窗 */
             dismiss_app_error_dialog();
-            if (g_auto_cache_state == 1) {
-                DWORD elapsed = GetTickCount() - g_auto_cache_start_tick;
-                if (elapsed > 300000) {
-                    note("AUTO_CACHE: 自动切片渲染超时 (%lu ms)，重置状态", elapsed);
-                    g_auto_cache_mode = 0;
-                    g_inject_user_save = 0;
-                    g_auto_cache_state = 0;
-                    g_pending_cmd_after_cache = 0;
-                    if (g_auto_cache_tif_path[0]) DeleteFileA(g_auto_cache_tif_path);
-                } else {
-                    WIN32_FILE_ATTRIBUTE_DATA fad;
-                    const char *tp = g_auto_cache_tif_path[0] ? g_auto_cache_tif_path : "C:\\ok3dtemp\\_auto_cache.tif";
-                    if (GetFileAttributesExA(tp, GetFileExInfoStandard, &fad)) {
-                        DWORD sz = fad.nFileSizeLow;
-                        int views = psd_count_views("C:\\ok3dtemp\\");
-                        if (sz > 1000 && views > 0) {
-                            if (sz == g_auto_cache_last_sz) g_auto_cache_stable_hits++;
-                            else { g_auto_cache_last_sz = sz; g_auto_cache_stable_hits = 0; }
-                            if (g_auto_cache_stable_hits >= 4) {
-                                int next_cmd = g_pending_cmd_after_cache;
-                                dismiss_app_error_dialog();
-                                DeleteFileA(tp);
-                                g_auto_cache_mode = 0;
-                                g_auto_cache_state = 0;
-                                g_pending_cmd_after_cache = 0;
-                                if (g_pending_user_save_path[0]) g_inject_user_save = 1;
-                                note("AUTO_CACHE: 切片渲染完成 (tif=%lu B, views=%d)，自动续发命令 %d",
-                                     sz, views, next_cmd);
-                                Sleep(300);
-                                if (next_cmd) PostMessageA(hmain, WM_COMMAND, next_cmd, 0);
-                            }
+            /* 仅当已有切片缓存时（已导出过 TIFF）同步启用 PSD1，防止 EReadError 跳过 0x506147 导致菜单仍灰 */
+            if (GetFileAttributesA("C:\\ok3dtemp\\vwd001.gjs") != INVALID_FILE_ATTRIBUTES) {
+                char *form = NULL;
+                if (!IsBadReadPtr((void *)0x005230B8, 4))
+                    form = *(char **)0x005230B8;
+                if (form && !IsBadReadPtr(form, 0x500)) {
+                    char *psd1 = *(char **)(form + 0x4DC);
+                    if (psd1 && !IsBadWritePtr(psd1 + 0x39, 1) && *(unsigned char *)(psd1 + 0x39) == 0) {
+                        *(unsigned char *)(psd1 + 0x39) = 1;
+                        HMENU hm = GetMenu(hmain);
+                        if (hm) {
+                            HMENU sm = GetSubMenu(hm, 1);
+                            if (sm) EnableMenuItem(sm, 17, 0);
                         }
+                        note("LAYER_UNLOCK: 检测到切片缓存，已启用【输出PSD】菜单");
                     }
                 }
             }
-            if (g_auto_cache_state == 0) {
+            /* 无模态弹窗时再非阻塞更新主窗口标题，防止保存框期间跨线程阻塞 */
+            if (GetLastActivePopup(hmain) == hmain) {
                 char title[512];
-                if (GetWindowTextA(hmain, title, sizeof(title)) > 0) {
+                DWORD_PTR res = 0;
+                title[0] = 0;
+                if (SendMessageTimeoutA(hmain, WM_GETTEXT, sizeof(title), (LPARAM)title,
+                                        SMTO_ABORTIFHUNG | SMTO_BLOCK, 100, &res) && title[0]) {
                     if (strncmp(title, "Psdto3d 10", 10) == 0 && !strstr(title, "2026.11.26")) {
                         char new_title[512];
                         const char *rest = title + 10;
@@ -3198,17 +3029,9 @@ static DWORD WINAPI load_watch(LPVOID p)
                         } else {
                             lstrcpyA(new_title, "Psdto3d 10.1 (2026.11.26)");
                         }
-                        SetWindowTextA(hmain, new_title);
+                        SendMessageTimeoutA(hmain, WM_SETTEXT, 0, (LPARAM)new_title,
+                                            SMTO_ABORTIFHUNG | SMTO_BLOCK, 100, &res);
                     }
-                }
-            }
-            HMENU hm = GetMenu(hmain);
-            if (hm) {
-                HMENU sm = GetSubMenu(hm, 1);
-                if (sm) {
-                    EnableMenuItem(sm, 16, 0); /* MF_BYCOMMAND | MF_ENABLED */
-                    EnableMenuItem(sm, 17, 0);
-                    EnableMenuItem(sm, 18, 0);
                 }
             }
         }
@@ -3254,18 +3077,7 @@ static DWORD WINAPI load_watch(LPVOID p)
                 } else {
                     note("NATIVE callsite bytes: %02X %02X", cs[0], cs[1]);
                 }
-                /* 解锁 PSD 导出菜单使能 (PSD1.Enabled := True) */
-                unsigned char *pe = (unsigned char *)((char *)he + 0x1051E0);
-                if (pe[0] == 0x33 && pe[1] == 0xD2) {
-                    DWORD oldp3;
-                    if (VirtualProtect(pe, 2, PAGE_EXECUTE_READWRITE, &oldp3)) {
-                        pe[0] = 0xB2;
-                        pe[1] = 0x01; /* mov dl, 1 */
-                        VirtualProtect(pe, 2, oldp3, &oldp3);
-                        FlushInstructionCache(GetCurrentProcess(), pe, 2);
-                        note("NATIVE psd menu unlock patched at %p (mov dl, 1)", pe);
-                    }
-                }
+                /* 保持原版按操作层级启用 PSD 导出菜单 (不强行修改 0x1051E0) */
                 /* 解除 N7Click / N26Click 按钮状态守卫，直通底层导出管线 */
                 unsigned char *p_n7 = (unsigned char *)((char *)he + 0x10B080);
                 if (p_n7[0] == 0x75 && p_n7[1] == 0x09) {
