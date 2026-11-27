@@ -386,6 +386,7 @@ static BOOL WINAPI e_gofna(void *p)
     }
     note("EMU gofn exhausted");
     if (o_gofna) {
+        if (p) *(DWORD *)((char *)p + 0x34) |= 0x00000008; /* OFN_NOCHANGEDIR */
         BOOL ok = ((BOOL (WINAPI *)(void *))o_gofna)(p);
         if (ok && file && psd_guard_dialog(file)) return FALSE;
         if (ok && file && maxfile && has_non_ascii(file)) {
@@ -1381,6 +1382,9 @@ static unsigned long g_zu06_base;
 static HANDLE WINAPI e_cfa_logonly(LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
 static BOOL WINAPI e_wf_logonly(HANDLE, LPCVOID, DWORD, LPDWORD, LPOVERLAPPED);
 static void sbp_arm_real(void);
+static void ensure_real_patched(void);
+static unsigned g_last_cmd_addr = 0;
+static unsigned g_cnt_002a = 0;
 
 static BOOL WINAPI e_dio(HANDLE h, DWORD code, LPVOID in, DWORD inlen, LPVOID out,
                          DWORD outlen, LPDWORD ret, LPOVERLAPPED ov)
@@ -1446,89 +1450,65 @@ static BOOL WINAPI e_dio(HANDLE h, DWORD code, LPVOID in, DWORD inlen, LPVOID ou
             return TRUE;
         }
         store_init();
-        if (addr == 0x00C2 && op == 0xDD && !g_real_base) sbp_arm_real();
+        if (addr == 0x00C2 && op == 0xDD) ensure_real_patched();
         if (op == 0xDD && dtl == 0) {
             note("EMU zero-write addr=%04X -> ACK", addr);
             return TRUE;
         }
-        /* replay alignment: find next matching event in real-dongle sequence */
-        while (g_rp_idx < RP_N && !(g_rp[g_rp_idx].op == op && g_rp[g_rp_idx].addr == addr && g_rp[g_rp_idx].len == (unsigned)dtl))
-            g_rp_idx++;
-        if (g_rp_idx < RP_N) {
-            if (op == 0xD1) {
-                memcpy(dbuf, g_rp[g_rp_idx].data, dtl);
-                if (ret) *ret = dtl;
-                note("EMU replay R idx=%d addr=%04X dtl=%u", g_rp_idx, addr, dtl);
-                g_rp_idx++;
-                return TRUE;
+        if (op == 0xDD) {                /* write at address; record cmd state and store payload */
+            if (addr == 0x001A || addr == 0x003A || addr == 0x002A || addr == 0x00C2 || addr == 0x0012) {
+                g_last_cmd_addr = addr;
+                if (addr == 0x001A) g_cnt_002a = 0;
+                else if (addr == 0x002A) g_cnt_002a++;
             }
-            if (op == 0xDD) {
-                if (addr < 1049088) memcpy(g_store + addr, g_rp[g_rp_idx].data, dtl);
-                memcpy(g_store + addr + dtl, K_ACK5, 5);
-                if (dtl == 496) memcpy(g_rec, g_rp[g_rp_idx].data, 496);
-                note("EMU replay W idx=%d addr=%04X dtl=%u", g_rp_idx, addr, dtl);
-                {
-                    char hx[160]; unsigned k, lim = dtl < 48 ? dtl : 48;
-                    for (k = 0; k < lim; k++) wsprintfA(hx + k * 2, "%02X", ((unsigned char *)dbuf)[k]);
-                    hx[lim * 2] = 0;
-                    note("EMU reqW addr=%04X data=%s", addr, hx);
-                }
-                {
-                    const unsigned char *cap = g_rp[g_rp_idx].data;
-                    unsigned k; int nd = 0; char line[512]; int o2 = 0;
-                    for (k = 0; k < dtl && nd < 24; k++) {
-                        unsigned char a = ((const unsigned char *)dbuf)[k], b = cap[k];
-                        if (a != b) {
-                            nd++;
-                            o2 += wsprintfA(line + o2, "%u:%02X/%02X ", k, a, b);
-                        }
-                    }
-                    if (nd) note("EMU DIFF addr=%04X dwords: %s", addr, line);
-                }
-                g_rp_idx++;
-                return TRUE;
-            }
-        }
-
-        if (op == 0xDD) {                /* write at address; dongle appends ACK */
             if (addr < 1049088 && dtl <= 1049088 - addr - 5) {
                 memcpy(g_store + addr, dbuf, dtl);
                 memcpy(g_store + addr + dtl, K_ACK5, 5);
             }
             if (dtl == 496) { memcpy(g_rec, dbuf, 496); }
-                        {
-                char hx[128]; unsigned k;
-                unsigned lim = dtl < 16 ? dtl : 16;
-                for (k = 0; k < lim; k++) wsprintfA(hx + k * 2, "%02X", ((unsigned char *)dbuf)[k]);
-                hx[lim * 2] = 0;
-                note("EMU write addr=%04X dtl=%u data=%s", addr, dtl, hx);
-            }
             return TRUE;
         }
-        if (op == 0xD1) {                /* read: echo store at address; dtl=5 is status */
+        if (op == 0xD1) {                /* stateless repeatable dongle read */
             unsigned i;
             unsigned long a;
             unsigned char *b = (unsigned char *)dbuf;
-            if (dtl == 5) {
-                if (addr == 0x001A) { b[0]=0xFB; b[1]=0x01; b[2]=0x00; b[3]=0x48; b[4]=0x01; }
-                else memcpy(b, K_ACK5, 5);
-            } else if (dtl == 501 && addr == 0x000A) {
-                int k5 = g_501idx < 4 ? g_501idx : 3;
-                memcpy(b, g_501resp[k5], 501);
-                if (g_501idx < 4) g_501idx++;
-            } else {
-                for (i = 0; i < dtl; i++) {
-                    a = addr + i;
-                    b[i] = (a < 1049088) ? g_store[a] : 0xFB;
-                }
+            if (dtl == 9 && addr == 0x0000) {
+                memcpy(b, g_rp[12].data, 9);
+                if (ret) *ret = 9;
+                return TRUE;
             }
-            {
-    char hx[128]; unsigned k;
-    unsigned lim = dtl < 16 ? dtl : 16;
-    for (k = 0; k < lim; k++) wsprintfA(hx + k * 2, "%02X", b[k]);
-    hx[lim * 2] = 0;
-    note("EMU read  addr=%04X dtl=%u data=%s", addr, dtl, hx);
-}
+            if (dtl == 5) {
+                if (addr == 0x01F0) {
+                    b[0]=0xFB; b[1]=0x00; b[2]=0x00; b[3]=0x00; b[4]=0x00;
+                } else if (addr == 0x001A || addr == 0x003A || addr == 0x002A || addr == 0x00C2 || addr == 0x0012) {
+                    b[0]=0xFB; b[1]=0x01; b[2]=0x00; b[3]=0x48; b[4]=0x01;
+                } else {
+                    memcpy(b, K_ACK5, 5);
+                }
+                if (ret) *ret = 5;
+                return TRUE;
+            }
+            if (dtl == 501 && addr == 0x000A) {
+                int idx = 5;
+                if (g_last_cmd_addr == 0x001A) idx = 5;
+                else if (g_last_cmd_addr == 0x003A) idx = 24;
+                else if (g_last_cmd_addr == 0x002A) {
+                    static const int tbl_2a[4] = {30, 36, 42, 48};
+                    unsigned k2a = (g_cnt_002a > 0) ? (g_cnt_002a - 1) : 0;
+                    if (k2a > 3) k2a = 3;
+                    idx = tbl_2a[k2a];
+                } else if (g_last_cmd_addr == 0x00C2) idx = 54;
+                else if (g_last_cmd_addr == 0x0012) idx = 66;
+                memcpy(b, g_rp[idx].data, 501);
+                if (ret) *ret = 501;
+                note("EMU statereplay R cmd=%04X idx=%d", g_last_cmd_addr, idx);
+                return TRUE;
+            }
+            for (i = 0; i < dtl; i++) {
+                a = addr + i;
+                b[i] = (a < 1049088) ? g_store[a] : 0xFB;
+            }
+            if (ret) *ret = dtl;
             return TRUE;
         }
         note("EMU ioctl op=%02X addr=%04X dtl=%u (passthrough)", op, addr, dtl);
@@ -1772,25 +1752,262 @@ static void patch_real_module(HMODULE m)
     note("EMU patched real dll IAT base=%p", m);
 }
 
-static void sbp_arm_real(void)
+static int g_real_hooks_installed;
+
+static int install_inline_hook(void *target, const unsigned char *expected, size_t nbytes,
+                               void (__cdecl *cb)(unsigned long ebp))
+{
+    unsigned char *src = (unsigned char *)target;
+    unsigned char *tramp;
+    DWORD oldp;
+    size_t pos = 0;
+    long rel;
+    if (!src || nbytes < 5 || nbytes > 16 || IsBadReadPtr(src, nbytes)) {
+        note("HOOK bad target=%p n=%u", target, (unsigned)nbytes);
+        return 0;
+    }
+    if (memcmp(src, expected, nbytes) != 0) {
+        note("HOOK mismatch at %p: %02X %02X %02X %02X", target, src[0], src[1], src[2], src[3]);
+        return 0;
+    }
+    tramp = (unsigned char *)VirtualAlloc(NULL, 128, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!tramp) return 0;
+    tramp[pos++] = 0x60; /* pushad */
+    tramp[pos++] = 0x9C; /* pushfd */
+    tramp[pos++] = 0x55; /* push ebp */
+    tramp[pos++] = 0xE8; /* call cb */
+    rel = (long)((unsigned char *)cb - (tramp + pos + 4));
+    memcpy(tramp + pos, &rel, 4); pos += 4;
+    tramp[pos++] = 0x83; tramp[pos++] = 0xC4; tramp[pos++] = 0x04; /* add esp, 4 */
+    tramp[pos++] = 0x9D; /* popfd */
+    tramp[pos++] = 0x61; /* popad */
+    memcpy(tramp + pos, src, nbytes); pos += nbytes;
+    tramp[pos++] = 0xE9; /* jmp back */
+    rel = (long)((src + nbytes) - (tramp + pos + 4));
+    memcpy(tramp + pos, &rel, 4); pos += 4;
+    if (!VirtualProtect(src, nbytes, PAGE_EXECUTE_READWRITE, &oldp)) {
+        VirtualFree(tramp, 0, MEM_RELEASE);
+        return 0;
+    }
+    src[0] = 0xE9;
+    rel = (long)(tramp - (src + 5));
+    memcpy(src + 1, &rel, 4);
+    for (pos = 5; pos < nbytes; pos++) src[pos] = 0x90;
+    VirtualProtect(src, nbytes, oldp, &oldp);
+    FlushInstructionCache(GetCurrentProcess(), src, nbytes);
+    FlushInstructionCache(GetCurrentProcess(), tramp, 128);
+    note("HOOK installed %p -> tramp=%p cb=%p", target, tramp, cb);
+    return 1;
+}
+
+static void __cdecl hook_merg_7f9bf(unsigned long ebp)
+{
+    double x1 = 0.0, x2 = 0.0;
+    int dpi = 0, lpi = 0, w_in = 0, h_in = 0, real_w = 0, real_h = 0;
+    unsigned char fmt = 0;
+    ReadProcessMemory(GetCurrentProcess(), (LPCVOID)(ebp - 0x1b0), &x1, 8, NULL);
+    ReadProcessMemory(GetCurrentProcess(), (LPCVOID)(ebp - 0x1b8), &x2, 8, NULL);
+    ReadProcessMemory(GetCurrentProcess(), (LPCVOID)(ebp + 0x0C), &dpi, 4, NULL);
+    ReadProcessMemory(GetCurrentProcess(), (LPCVOID)(ebp + 0x14), &lpi, 4, NULL);
+    ReadProcessMemory(GetCurrentProcess(), (LPCVOID)(ebp + 0x1C), &w_in, 4, NULL);
+    ReadProcessMemory(GetCurrentProcess(), (LPCVOID)(ebp + 0x24), &h_in, 4, NULL);
+    ReadProcessMemory(GetCurrentProcess(), (LPCVOID)(ebp + 0x2C), &fmt, 1, NULL);
+    ReadProcessMemory(GetCurrentProcess(), (LPCVOID)0x5230D0, &real_w, 4, NULL);
+    ReadProcessMemory(GetCurrentProcess(), (LPCVOID)0x5230D4, &real_h, 4, NULL);
+
+    if (dpi <= 0) {
+        dpi = 720000;
+        WriteProcessMemory(GetCurrentProcess(), (LPVOID)(ebp + 0x0C), &dpi, 4, NULL);
+    }
+    if (lpi <= 0) {
+        lpi = 3200;
+        WriteProcessMemory(GetCurrentProcess(), (LPVOID)(ebp + 0x14), &lpi, 4, NULL);
+    }
+    if (w_in <= 0 || (double)w_in * (double)lpi < 10000.0) {
+        w_in = (10000 / lpi) + 1;
+        if (w_in < 100) w_in = 100;
+        WriteProcessMemory(GetCurrentProcess(), (LPVOID)(ebp + 0x1C), &w_in, 4, NULL);
+    }
+    if (h_in <= 0) {
+        h_in = 100;
+        WriteProcessMemory(GetCurrentProcess(), (LPVOID)(ebp + 0x24), &h_in, 4, NULL);
+    }
+    if (fmt < 1) {
+        fmt = 1;
+        WriteProcessMemory(GetCurrentProcess(), (LPVOID)(ebp + 0x2C), &fmt, 1, NULL);
+    }
+    if (x2 <= 0.0 || x2 < (double)fmt * 16.0) {
+        double calc = (real_h > 0) ? (double)real_h : ((double)h_in * (double)dpi / 1000000.0);
+        if (calc < (double)fmt * 16.0) calc = (double)fmt * 16.0;
+        if (calc < 2336.0 && real_h <= 0) calc = 2336.0;
+        x2 = calc;
+        WriteProcessMemory(GetCurrentProcess(), (LPVOID)(ebp - 0x1b8), &x2, 8, NULL);
+    }
+    if (cfg_on("inject_x2", 0, "_inject_x2.txt")) {
+        char inf[MAX_PATH];
+        lstrcpyA(inf, g_dir); lstrcatA(inf, "_inject_x2.txt");
+        HANDLE hf = CreateFileA(inf, GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, 0, 0);
+        if (hf != INVALID_HANDLE_VALUE) {
+            char tb[64]; DWORD gb = 0; int iv;
+            memset(tb, 0, sizeof(tb));
+            ReadFile(hf, tb, 63, &gb, 0);
+            CloseHandle(hf);
+            iv = atoi(tb);
+            if (iv > 0) {
+                double nv = (double)iv;
+                WriteProcessMemory(GetCurrentProcess(), (LPVOID)(ebp - 0x1b8), &nv, 8, NULL);
+            }
+        }
+    }
+    note("HOOK7F9BF dpi=%d lpi=%d fmt=%u X1=%.2f X2=%.2f real=%dx%d",
+         dpi, lpi, (unsigned)fmt, x1, x2, real_w, real_h);
+}
+
+static int parse_gjs_tiff_header(const char *path, int *out_w, int *out_h, int *out_off)
+{
+    unsigned char buf[512];
+    HANDLE hf;
+    DWORD nr = 0, fsz = 0;
+    unsigned ifd_off = 8, cnt = 0, i;
+    int w = 0, h = 0, off = 0, rps = 0, spp = 0, sbc = 0;
+    if (!path || IsBadReadPtr(path, 4)) return 0;
+    hf = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, 0, OPEN_EXISTING, 0, 0);
+    if (hf == INVALID_HANDLE_VALUE) return 0;
+    fsz = GetFileSize(hf, NULL);
+    ReadFile(hf, buf, sizeof(buf), &nr, NULL);
+    CloseHandle(hf);
+    if (nr < 24) return 0;
+    if ((buf[0] == 'I' && buf[1] == 'I') || (buf[0] == 'M' && buf[1] == 'M')) {
+        ifd_off = *(unsigned *)(buf + 4);
+    } else {
+        ifd_off = 8;
+    }
+    if (ifd_off + 2 > nr) return 0;
+    cnt = *(unsigned short *)(buf + ifd_off);
+    if (cnt > 40) cnt = 40;
+    for (i = 0; i < cnt; i++) {
+        unsigned pos = ifd_off + 2 + i * 12;
+        unsigned short tag, typ;
+        unsigned val;
+        if (pos + 12 > nr) break;
+        tag = *(unsigned short *)(buf + pos);
+        typ = *(unsigned short *)(buf + pos + 2);
+        val = *(unsigned *)(buf + pos + 8);
+        if (typ == 3) val &= 0xFFFFu;
+        if (tag == 0x0100) w = (int)val;
+        else if (tag == 0x0103 && val > 10 && w == 0) w = (int)val;
+        else if (tag == 0x0116 && val > 0 && rps == 0) rps = (int)val;
+        else if (tag == 0x0101) h = (int)val;
+        else if (tag == 0x0111) off = (int)val;
+        else if (tag == 0x0112 && val > 16 && off == 0) off = (int)val;
+        else if (tag == 0x0115) spp = (int)val;
+        else if (tag == 0x0117) sbc = (int)val;
+    }
+    if (w <= 0 && rps > 0) w = rps;
+    if (w <= 0 && h > 0 && spp > 0 && sbc > 0) w = sbc / (h * spp);
+    if (off <= 0 && sbc > 0 && fsz > (DWORD)sbc) off = (int)(fsz - (DWORD)sbc);
+    if (out_w) *out_w = w;
+    if (out_h) *out_h = h;
+    if (out_off) *out_off = off;
+    return (w > 0 && h > 0);
+}
+
+static void __cdecl hook_merg_7fbf1(unsigned long ebp)
+{
+    unsigned char cnt = 0;
+    char *arr = NULL;
+    int real_w = 0, real_h = 0, min_w = 0, min_h = 0, off0 = 0;
+    ReadProcessMemory(GetCurrentProcess(), (LPCVOID)(ebp - 0x133), &cnt, 1, NULL);
+    ReadProcessMemory(GetCurrentProcess(), (LPCVOID)(ebp - 0x1f4), &arr, 4, NULL);
+    ReadProcessMemory(GetCurrentProcess(), (LPCVOID)0x5230D0, &real_w, 4, NULL);
+    ReadProcessMemory(GetCurrentProcess(), (LPCVOID)0x5230D4, &real_h, 4, NULL);
+
+    if (arr && cnt > 0 && !IsBadWritePtr(arr, (size_t)cnt * 16)) {
+        int i2;
+        for (i2 = 0; i2 < (int)cnt; i2++) {
+            const char *fn = *(const char **)(arr + i2 * 16);
+            int f4 = *(int *)(arr + i2 * 16 + 4);
+            int f8 = *(int *)(arr + i2 * 16 + 8);
+            int fc = *(int *)(arr + i2 * 16 + 12);
+            if (f4 <= 0 || f8 <= 0 || fc <= 0) {
+                int pw = 0, ph = 0, poff = 0;
+                if (parse_gjs_tiff_header(fn, &pw, &ph, &poff)) {
+                    if (f4 <= 0 && pw > 0) { f4 = pw; *(int *)(arr + i2 * 16 + 4) = f4; }
+                    if (f8 <= 0 && ph > 0) { f8 = ph; *(int *)(arr + i2 * 16 + 8) = f8; }
+                    if (fc <= 0 && poff > 0) { fc = poff; *(int *)(arr + i2 * 16 + 12) = fc; }
+                }
+            }
+            if (i2 == 0) off0 = fc;
+            if (f4 > 0 && (min_w == 0 || f4 < min_w)) min_w = f4;
+            if (f8 > 0 && (min_h == 0 || f8 < min_h)) min_h = f8;
+        }
+    }
+    if (min_w <= 0) min_w = (real_h > 0) ? real_h : ((real_w > 0) ? real_w : 1);
+    if (min_h <= 0) min_h = (real_w > 0) ? real_w : ((real_h > 0) ? real_h : 1);
+    WriteProcessMemory(GetCurrentProcess(), (LPVOID)(ebp - 0x124), &min_w, 4, NULL);
+    WriteProcessMemory(GetCurrentProcess(), (LPVOID)(ebp - 0x128), &min_h, 4, NULL);
+    note("HOOK7FBF1 cnt=%u min=%dx%d off0=%d", (unsigned)cnt, min_w, min_h, off0);
+}
+
+static void __cdecl hook_merg_7fdab(unsigned long ebp)
+{
+    int w10c = 0, w110 = 0, w124 = 0, x2i = 0;
+    unsigned char fmt = 0;
+    ReadProcessMemory(GetCurrentProcess(), (LPCVOID)(ebp - 0x10C), &w10c, 4, NULL);
+    ReadProcessMemory(GetCurrentProcess(), (LPCVOID)(ebp - 0x110), &w110, 4, NULL);
+    ReadProcessMemory(GetCurrentProcess(), (LPCVOID)(ebp - 0x124), &w124, 4, NULL);
+    ReadProcessMemory(GetCurrentProcess(), (LPCVOID)(ebp - 0x128), &x2i, 4, NULL);
+    ReadProcessMemory(GetCurrentProcess(), (LPCVOID)(ebp + 0x2C), &fmt, 1, NULL);
+    if (w10c <= 0) {
+        int val = (w124 > 0) ? w124 : 1;
+        WriteProcessMemory(GetCurrentProcess(), (LPVOID)(ebp - 0x10C), &val, 4, NULL);
+    }
+    if (w110 <= 0) {
+        int val = (w124 > 0) ? w124 : 16;
+        WriteProcessMemory(GetCurrentProcess(), (LPVOID)(ebp - 0x110), &val, 4, NULL);
+    }
+    if (w124 <= 0) {
+        int val = (w10c > 0) ? w10c : 1;
+        WriteProcessMemory(GetCurrentProcess(), (LPVOID)(ebp - 0x124), &val, 4, NULL);
+    }
+    if (x2i <= 0) {
+        int val = 16;
+        WriteProcessMemory(GetCurrentProcess(), (LPVOID)(ebp - 0x128), &val, 4, NULL);
+    }
+    if (fmt == 0) {
+        unsigned char one = 1;
+        WriteProcessMemory(GetCurrentProcess(), (LPVOID)(ebp + 0x2C), &one, 1, NULL);
+    }
+}
+
+static void ensure_real_patched(void)
 {
     HMODULE h = GetModuleHandleA("cmyktiff2_real.dll");
-    if (!h) { note("SBp real: module not loaded"); return; }
+    if (!h) return;
     g_real_base = (unsigned long)h;
-    patch_real_module(h);              /* IAT 透传+记录，抓包/正常都需要 */
-    if (capture_mode()) {
-        /* 真狗抓包模式：绝对不要改真库的代码/栈（软件断点会让它闪退） */
-        note("SBp real skipped (capture mode) base=%08lX", g_real_base);
-        return;
+    patch_real_module(h);
+    if (capture_mode() || g_real_hooks_installed) return;
+    {
+        static const unsigned char exp_7f9bf[6] = {0xDD, 0x85, 0x58, 0xFE, 0xFF, 0xFF};
+        static const unsigned char exp_7fbf1[8] = {0x33, 0xC0, 0x89, 0x85, 0xE0, 0xFE, 0xFF, 0xFF};
+        static const unsigned char exp_7fdab[6] = {0xDB, 0x85, 0xD8, 0xFE, 0xFF, 0xFF};
+        int ok1 = install_inline_hook((void *)(g_real_base + 0x7F9BF), exp_7f9bf, 6, hook_merg_7f9bf);
+        int ok2 = install_inline_hook((void *)(g_real_base + 0x7FBF1), exp_7fbf1, 8, hook_merg_7fbf1);
+        int ok3 = install_inline_hook((void *)(g_real_base + 0x7FDAB), exp_7fdab, 6, hook_merg_7fdab);
+        if (ok1 && ok2 && ok3) g_real_hooks_installed = 1;
     }
-    sbp_arm(g_real_base + 0x7F9BF);
-    sbp_arm(g_real_base + 0x6289C);   /* right after call 0x472D68 (decode engine) */
-    sbp_arm(g_real_base + 0x7FF98);   /* mode switch before savetiff00 */
-    sbp_arm(g_real_base + 0x7FBF1);   /* just after the container parse loop */
-    sbp_arm(g_real_base + 0x80382);   /* right before call [stai] */
-    sbp_arm(g_real_base + 0x7E9D0);   /* savetiff00 entry */
-    sbp_arm(g_real_base + 0x71FE5);  /* right after CreateFileA(GENERIC_WRITE) on the license file */
-    note("SBp real base=%08lX -> %08lX", g_real_base, g_real_base + 0x7F9BF);
+    if (cfg_on("sbp_trace", 0, "_sbp_trace.txt")) {
+        sbp_arm(g_real_base + 0x6289C);
+        sbp_arm(g_real_base + 0x7FF98);
+        sbp_arm(g_real_base + 0x80382);
+        sbp_arm(g_real_base + 0x7E9D0);
+        sbp_arm(g_real_base + 0x71FE5);
+    }
+}
+
+static void sbp_arm_real(void)
+{
+    ensure_real_patched();
 }
 
 static LONG CALLBACK sbp_veh(EXCEPTION_POINTERS *ep)
@@ -2288,17 +2505,17 @@ imports_done:
         note("CAPTURE ready (no VEH, no breakpoints)");
         return;
     }
-    /* software breakpoints (reliable) */
+    /* software breakpoints (optional debug trace only) */
     g_veh = AddVectoredExceptionHandler(1, sbp_veh);
     note("VEH installed = %p", g_veh);
-    sbp_arm_checked((unsigned long)base + 0x10B070, 0x53);  /* 0x50B070 GATE1 entry */
-    sbp_arm_checked((unsigned long)base + 0x10B07E, 0x3C);  /* 0x50B07E cmp al,1 */
-    sbp_arm_checked((unsigned long)base + 0x10B086, 0xE8);  /* 0x50B086 call 0x505A44 */
-    /* sbp_arm_checked((unsigned long)base + 0x105A66, 0x8B); */  /* 0x505A66 post-GATE1 */
-    sbp_arm_checked((unsigned long)base + 0x3265E, 0x8B);   /* 0x43265E Execute entry */
-    sbp_arm_checked((unsigned long)base + 0x10B073, 0x8B);  /* 0x50B073 load btn obj */
-
-
+    ensure_real_patched();
+    if (cfg_on("sbp_trace", 0, "_sbp_trace.txt")) {
+        sbp_arm_checked((unsigned long)base + 0x10B070, 0x53);  /* 0x50B070 GATE1 entry */
+        sbp_arm_checked((unsigned long)base + 0x10B07E, 0x3C);  /* 0x50B07E cmp al,1 */
+        sbp_arm_checked((unsigned long)base + 0x10B086, 0xE8);  /* 0x50B086 call 0x505A44 */
+        sbp_arm_checked((unsigned long)base + 0x3265E, 0x8B);   /* 0x43265E Execute entry */
+        sbp_arm_checked((unsigned long)base + 0x10B073, 0x8B);  /* 0x50B073 load btn obj */
+    }
 }
 
 
@@ -2984,6 +3201,7 @@ static DWORD WINAPI load_watch(LPVOID p)
             arrwatch_tick();
         startup_cleanup();
         localize_dialogs();
+        ensure_real_patched();
 
         HWND hmain = FindWindowA("TForm1", NULL);
         if (seen_hmain && (!hmain || !IsWindow(hmain))) {
@@ -3077,28 +3295,7 @@ static DWORD WINAPI load_watch(LPVOID p)
                 } else {
                     note("NATIVE callsite bytes: %02X %02X", cs[0], cs[1]);
                 }
-                /* 保持原版按操作层级启用 PSD 导出菜单 (不强行修改 0x1051E0) */
-                /* 解除 N7Click / N26Click 按钮状态守卫，直通底层导出管线 */
-                unsigned char *p_n7 = (unsigned char *)((char *)he + 0x10B080);
-                if (p_n7[0] == 0x75 && p_n7[1] == 0x09) {
-                    DWORD oldp4;
-                    if (VirtualProtect(p_n7, 2, PAGE_EXECUTE_READWRITE, &oldp4)) {
-                        p_n7[0] = 0x90; p_n7[1] = 0x90; /* nop nop */
-                        VirtualProtect(p_n7, 2, oldp4, &oldp4);
-                        FlushInstructionCache(GetCurrentProcess(), p_n7, 2);
-                        note("NATIVE N7Click guard patched to NOP at %p", p_n7);
-                    }
-                }
-                unsigned char *p_n26 = (unsigned char *)((char *)he + 0x10B060);
-                if (p_n26[0] == 0x75 && p_n26[1] == 0x09) {
-                    DWORD oldp5;
-                    if (VirtualProtect(p_n26, 2, PAGE_EXECUTE_READWRITE, &oldp5)) {
-                        p_n26[0] = 0x90; p_n26[1] = 0x90; /* nop nop */
-                        VirtualProtect(p_n26, 2, oldp5, &oldp5);
-                        FlushInstructionCache(GetCurrentProcess(), p_n26, 2);
-                        note("NATIVE N26Click guard patched to NOP at %p", p_n26);
-                    }
-                }
+                /* 保持原版按操作层级启用 PSD 导出菜单与 N7Click/N26Click 按钮守卫 (不强行修改) */
                 /* FormClose 写完配置后将 [0x5230B4] 清零而不调用 DynArrayClear，兼顾消除退出与 Finalization 报错 */
                 unsigned char *p_fc = (unsigned char *)((char *)he + 0xFF66B);
                 if (p_fc[0] == 0x6A && p_fc[1] == 0x00 && p_fc[2] == 0xB8 &&

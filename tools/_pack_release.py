@@ -14,7 +14,10 @@ with zipfile.ZipFile(out_zip, 'w', compression=zipfile.ZIP_DEFLATED, compresslev
     for root, dirs, files in os.walk(src_dir):
         # 排除临时文件
         for fn in sorted(files):
-            if fn.endswith('.orig') or fn.endswith('.log') or fn.startswith('_dlg') or fn.startswith('test_'):
+            if (fn.endswith('.orig') or fn.endswith('.log') or fn.startswith('_dlg') or
+                    fn.startswith('test_') or fn.startswith('sample_out.') or
+                    fn in ('_dongle_dev.bin', '_psdfix.tw3d2', '_gxwj_conv.tw3d2',
+                           'autocache.tif', 'manual_save_test.tif')):
                 continue
             abs_path = os.path.join(root, fn)
             rel_path = os.path.relpath(abs_path, src_dir)
