@@ -1,7 +1,8 @@
-import os, sys, zipfile, hashlib
+import os, sys, zipfile, hashlib, datetime
 
 src_dir = r"C:\Home\Workspace\UGit\psdto\_work\交付_10.1"
-out_zip = r"C:\Home\Workspace\UGit\psdto\_work\PSDTO3D_10.1_2026-11-26.zip"
+today_str = datetime.date.today().strftime("%Y-%m-%d")
+out_zip = rf"C:\Home\Workspace\UGit\psdto\_work\PSDTO3D_10.1_{today_str}.zip"
 
 if os.path.exists(out_zip):
     os.remove(out_zip)
