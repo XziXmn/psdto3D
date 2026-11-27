@@ -495,15 +495,30 @@ static int psd_read_alpha(const char *dir, int idx, int w, int h, unsigned char 
 }
 
 
-static int psd_count_views(const char *dir)
+static int psd_count_views_matching(const char *dir, int w, int h, int max_views)
 {
     int i, n = 0;
-    for (i = 1; i <= 64; i++) {
+    int lim = (max_views > 0 && max_views <= 64) ? max_views : 64;
+    unsigned long plane = (w > 0 && h > 0) ? (unsigned long)w * (unsigned long)h : 0;
+    for (i = 1; i <= lim; i++) {
         char p1[MAX_PATH], p2[MAX_PATH];
+        HANDLE hf;
+        DWORD fsz = 0;
         wsprintfA(p1, "%svwd%03d.gjs", dir, i);
         wsprintfA(p2, "%svwdt%03d.gjs", dir, i);
         if (GetFileAttributesA(p1) == INVALID_FILE_ATTRIBUTES) break;
         if (GetFileAttributesA(p2) == INVALID_FILE_ATTRIBUTES) break;
+        if (plane > 0) {
+            hf = CreateFileA(p1, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, 0, OPEN_EXISTING, 0, 0);
+            if (hf == INVALID_HANDLE_VALUE) break;
+            fsz = GetFileSize(hf, NULL);
+            CloseHandle(hf);
+            if (fsz == INVALID_FILE_SIZE) break;
+            if (!((fsz >= plane * 3 && fsz - plane * 3 <= 2048) ||
+                  (fsz >= plane * 4 && fsz - plane * 4 <= 2048))) {
+                break;
+            }
+        }
         n = i;
     }
     return n;
@@ -518,18 +533,19 @@ static int psd_assemble(const char *out_path, const char *dir, int w, int h, int
     int spp = 3;
     unsigned short color_mode = 3;  /* 3 = RGB, 4 = CMYK */
     unsigned long name_pad, extra_len, rec_len, layer_info_len, lm_len;
+    int li_pad = 0;
     unsigned char hdr[64];
     unsigned char *pix = 0, *alpha = 0;
     char namebuf[100][8];
 
     {
-        int avail = psd_count_views(dir);
+        int avail = psd_count_views_matching(dir, w, h, views);
         if (avail <= 0) {
-            note("PSD build: 目录里没有 vwd*.gjs，放弃 (dir=%s)", dir ? dir : "(null)");
+            note("PSD build: 目录里没有匹配尺寸的 vwd*.gjs，放弃 (dir=%s)", dir ? dir : "(null)");
             return 0;
         }
         if (views != avail) {
-            note("PSD build: 传入层数=%d，实际中间文件=%d → 以实际为准", views, avail);
+            note("PSD build: 传入层数=%d，匹配中间文件=%d → 以匹配为准", views, avail);
             views = avail;
         }
     }
@@ -553,6 +569,10 @@ static int psd_assemble(const char *out_path, const char *dir, int w, int h, int
     extra_len = 4 + 4 + 8;
     rec_len = 16 + 2 + num_channels * 6 + 8 + 4 + 4 + extra_len;
     layer_info_len = 2 + (unsigned long)views * rec_len + (unsigned long)views * num_channels * chan_len;
+    if (layer_info_len & 1u) {
+        li_pad = 1;
+        layer_info_len += 1;
+    }
     lm_len = 4 + layer_info_len + 4;
 
     fh = CreateFileA(out_path, GENERIC_WRITE, 0, 0, CREATE_ALWAYS, 0, 0);
@@ -614,6 +634,7 @@ static int psd_assemble(const char *out_path, const char *dir, int w, int h, int
             if (pix) VirtualFree(pix, 0, MEM_RELEASE);
             if (alpha) VirtualFree(alpha, 0, MEM_RELEASE);
             CloseHandle(fh);
+            DeleteFileA(out_path);
             return 0;
         }
         { unsigned char z[2] = {0,0};
@@ -622,7 +643,7 @@ static int psd_assemble(const char *out_path, const char *dir, int w, int h, int
         for (k = 0; k < spp; k++) {
             unsigned long x;
             unsigned char *tmp = (unsigned char *)VirtualAlloc(0, plane, MEM_COMMIT, PAGE_READWRITE);
-            if (!tmp) { VirtualFree(pix, 0, MEM_RELEASE); VirtualFree(alpha, 0, MEM_RELEASE); CloseHandle(fh); return 0; }
+            if (!tmp) { VirtualFree(pix, 0, MEM_RELEASE); VirtualFree(alpha, 0, MEM_RELEASE); CloseHandle(fh); DeleteFileA(out_path); return 0; }
             for (x = 0; x < plane; x++) tmp[x] = pix[x * spp + k];
             { unsigned char z[2] = {0,0}; WriteFile(fh, z, 2, &wr, 0); }
             WriteFile(fh, tmp, plane, &wr, 0);
@@ -632,21 +653,28 @@ static int psd_assemble(const char *out_path, const char *dir, int w, int h, int
         VirtualFree(alpha, 0, MEM_RELEASE);
         note("PSD build: 层 %d/%d 完成", i, views);
     }
+    if (li_pad) { unsigned char z1 = 0; WriteFile(fh, &z1, 1, &wr, 0); }
     { unsigned char z[4] = {0,0,0,0}; WriteFile(fh, z, 4, &wr, 0); }   /* 全局蒙版 */
 
-    /* 合并图（第 1 个视图）*/
+    /* 合并图（第 1 个视图）: Image Data Section 头部只有 1 个 2 字节 Raw 压缩标志 */
+    { unsigned char z[2] = {0,0}; WriteFile(fh, z, 2, &wr, 0); }
     if (psd_read_vwd(dir, 1, w, h, &spp, &pix)) {
         unsigned char *tmp = (unsigned char *)VirtualAlloc(0, plane, MEM_COMMIT, PAGE_READWRITE);
         if (tmp) {
             unsigned long x; int kk;
             for (kk = 0; kk < spp; kk++) {
                 for (x = 0; x < plane; x++) tmp[x] = pix[x * spp + kk];
-                { unsigned char z[2] = {0,0}; WriteFile(fh, z, 2, &wr, 0); }
                 WriteFile(fh, tmp, plane, &wr, 0);
             }
             VirtualFree(tmp, 0, MEM_RELEASE);
+        } else {
+            unsigned char *zbuf = (unsigned char *)VirtualAlloc(0, plane, MEM_COMMIT, PAGE_READWRITE);
+            if (zbuf) { int kk; for (kk = 0; kk < spp; kk++) WriteFile(fh, zbuf, plane, &wr, 0); VirtualFree(zbuf, 0, MEM_RELEASE); }
         }
         VirtualFree(pix, 0, MEM_RELEASE);
+    } else {
+        unsigned char *zbuf = (unsigned char *)VirtualAlloc(0, plane, MEM_COMMIT, PAGE_READWRITE);
+        if (zbuf) { int kk; for (kk = 0; kk < spp; kk++) WriteFile(fh, zbuf, plane, &wr, 0); VirtualFree(zbuf, 0, MEM_RELEASE); }
     }
     CloseHandle(fh);
     note("PSD build: 完成 %s (spp=%d mode=%d)", out_path, spp, color_mode);
@@ -772,8 +800,8 @@ int __stdcall writepsd_shim(const char *file, const char *dir,
          file ? file : "(null)", dir ? dir : "(null)", layers, w, h, spp);
 
     if (file && dir && layers > 0 && layers <= 64 && w > 0 && h > 0) {
-        int avail = psd_count_views(dir);
-        note("NATIVE writepsd: 当前可用切片数=%d (layers=%d)", avail, layers);
+        int avail = psd_count_views_matching(dir, w, h, layers);
+        note("NATIVE writepsd: 当前匹配切片数=%d (layers=%d)", avail, layers);
         psd_assemble(g_native_file, g_native_dir, w, h, avail > 0 ? avail : layers);
     }
 
@@ -836,14 +864,133 @@ static BOOL WINAPI e_gsfn(void *p)
     return FALSE;
 }
 
+static HANDLE g_tif_handles[8];
+static char g_tif_paths[8][MAX_PATH];
+
+static int is_user_tiff_path(const char *path)
+{
+    size_t n;
+    const char *ext;
+    if (!path || IsBadReadPtr(path, 4)) return 0;
+    n = lstrlenA(path);
+    if (n < 5) return 0;
+    /* 排除 ok3dtemp 下的中间切片 */
+    {
+        const char *q = path;
+        while (*q) {
+            if ((q[0] == 'o' || q[0] == 'O') && (q[1] == 'k' || q[1] == 'K') &&
+                q[2] == '3' && (q[3] == 'd' || q[3] == 'D') &&
+                (q[4] == 't' || q[4] == 'T'))
+                return 0;
+            q++;
+        }
+    }
+    ext = path + n - 4;
+    if (lstrcmpiA(ext, ".tif") == 0) return 1;
+    if (n >= 6 && lstrcmpiA(path + n - 5, ".tiff") == 0) return 1;
+    return 0;
+}
+
+static void track_tif_handle(HANDLE h, const char *path)
+{
+    int i;
+    if (h == INVALID_HANDLE_VALUE || !h || !is_user_tiff_path(path)) return;
+    for (i = 0; i < 8; i++) {
+        if (!g_tif_handles[i] || g_tif_handles[i] == h) {
+            g_tif_handles[i] = h;
+            lstrcpynA(g_tif_paths[i], path, MAX_PATH);
+            return;
+        }
+    }
+}
+
+static void fix_exported_tiff_header(const char *path)
+{
+    HANDLE hf;
+    unsigned char buf[512];
+    DWORD nr = 0, nw = 0;
+    unsigned n, i;
+    int w = 0, h = 0;
+    if (!path || !path[0]) return;
+    hf = o_cfa ? o_cfa(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, 0, OPEN_EXISTING, 0, 0)
+               : CreateFileA(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, 0, OPEN_EXISTING, 0, 0);
+    if (hf == INVALID_HANDLE_VALUE) return;
+    if (!ReadFile(hf, buf, sizeof(buf), &nr, NULL) || nr < 24) {
+        if (o_ch) o_ch(hf); else CloseHandle(hf);
+        return;
+    }
+    if (buf[0] == 0x55 && buf[1] == 0x47 && buf[2] == 0xA7 && buf[3] == 0x01) {
+        buf[0] = 'I'; buf[1] = 'I'; buf[2] = 0x2A; buf[3] = 0x00;
+        buf[4] = 8;   buf[5] = 0;   buf[6] = 0;    buf[7] = 0;
+        n = *(unsigned short *)(buf + 8);
+        if (n > 40) n = 40;
+        for (i = 0; i < n; i++) {
+            unsigned pos = 10 + i * 12;
+            unsigned short tag, typ;
+            unsigned val;
+            if (pos + 12 > nr) break;
+            tag = *(unsigned short *)(buf + pos);
+            typ = *(unsigned short *)(buf + pos + 2);
+            val = *(unsigned *)(buf + pos + 8);
+            if (typ == 3) val &= 0xFFFFu;
+            if (tag == 0x19C9) {
+                *(unsigned short *)(buf + pos) = 0x00FE;
+            } else if (tag == 0x0103 && val > 10 && w == 0) {
+                *(unsigned short *)(buf + pos) = 0x0100;
+                w = (int)val;
+            } else if (tag == 0x0101) {
+                h = (int)val;
+            } else if (tag == 0x0112 && val > 16) {
+                *(unsigned short *)(buf + pos) = 0x0111;
+            }
+        }
+        if (h > 0) {
+            for (i = 0; i < n; i++) {
+                unsigned pos = 10 + i * 12;
+                unsigned short tag, typ;
+                unsigned val;
+                if (pos + 12 > nr) break;
+                tag = *(unsigned short *)(buf + pos);
+                typ = *(unsigned short *)(buf + pos + 2);
+                val = *(unsigned *)(buf + pos + 8);
+                if (typ == 3) val &= 0xFFFFu;
+                if (tag == 0x0116 && val > (unsigned)h) {
+                    if (typ == 3) *(unsigned short *)(buf + pos + 8) = (unsigned short)h;
+                    else *(unsigned *)(buf + pos + 8) = (unsigned)h;
+                }
+            }
+        }
+        SetFilePointer(hf, 0, 0, FILE_BEGIN);
+        WriteFile(hf, buf, nr, &nw, NULL);
+        note("TIF_FIX: %s (%dx%d -> standard II* TIFF)", path, w, h);
+    }
+    if (o_ch) o_ch(hf); else CloseHandle(hf);
+}
+
 static BOOL WINAPI e_ch(HANDLE h)
 {
+    char tif_path[MAX_PATH];
+    int has_tif = 0, i;
+    tif_path[0] = 0;
+    for (i = 0; i < 8; i++) {
+        if (g_tif_handles[i] == h) {
+            lstrcpynA(tif_path, g_tif_paths[i], MAX_PATH);
+            g_tif_handles[i] = NULL;
+            g_tif_paths[i][0] = 0;
+            has_tif = 1;
+            break;
+        }
+    }
     if (is_dev_handle(h)) {
-        int i;
         for (i = 0; i < g_ndev; i++) if (g_devs[i] == h) { g_devs[i] = g_devs[--g_ndev]; break; }
         note("EMU close dev handle");
     }
-    return o_ch ? o_ch(h) : CloseHandle(h);
+    {
+        BOOL r = o_ch ? o_ch(h) : CloseHandle(h);
+        if (has_tif && tif_path[0])
+            fix_exported_tiff_header(tif_path);
+        return r;
+    }
 }
 
 static void store_init(void)
@@ -1367,7 +1514,10 @@ static HANDLE WINAPI e_cfa(LPCSTR name, DWORD acc, DWORD share, LPSECURITY_ATTRI
             note("cfa %s", name);
         }
     }
-    return o_cfa(name, acc, share, sa, disp, flags, tmpl);
+    h = o_cfa(name, acc, share, sa, disp, flags, tmpl);
+    if ((acc & GENERIC_WRITE) && h != INVALID_HANDLE_VALUE)
+        track_tif_handle(h, name);
+    return h;
 }
 
 static void fill(unsigned char *dst, const unsigned char *src, unsigned n, unsigned want)
@@ -2564,6 +2714,8 @@ static HANDLE WINAPI e_cfa_logonly(LPCSTR name, DWORD acc, DWORD share, LPSECURI
         }
     }
     note("CFA[%s] %s", who, name ? name : "(null)");
+    if ((acc & GENERIC_WRITE) && h != INVALID_HANDLE_VALUE)
+        track_tif_handle(h, name);
     return h;
 }
 
@@ -2920,7 +3072,10 @@ static HANDLE WINAPI e_cfa_probe(LPCSTR name, DWORD acc, DWORD share, LPSECURITY
         if (l > 4 && lstrcmpiA(name + l - 4, ".psd") == 0)
             note("RIP3D CFA: %s", name);
     }
-    return o_cfa(name, acc, share, sa, disp, flags, tmpl);
+    HANDLE h = o_cfa(name, acc, share, sa, disp, flags, tmpl);
+    if ((acc & GENERIC_WRITE) && h != INVALID_HANDLE_VALUE)
+        track_tif_handle(h, name);
+    return h;
 }
 
 
@@ -3462,7 +3617,10 @@ static HANDLE WINAPI e_cfa_guard(LPCSTR name, DWORD acc, DWORD share, LPSECURITY
             }
         }
     }
-    return o_cfa(name, acc, share, sa, disp, flags, tmpl);
+    HANDLE h = o_cfa(name, acc, share, sa, disp, flags, tmpl);
+    if ((acc & GENERIC_WRITE) && h != INVALID_HANDLE_VALUE)
+        track_tif_handle(h, name);
+    return h;
 }
 
 static void patch_zu06(HMODULE m)
