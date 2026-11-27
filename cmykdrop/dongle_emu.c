@@ -920,6 +920,8 @@ static void fix_exported_tiff_header(const char *path)
         return;
     }
     if (buf[0] == 0x55 && buf[1] == 0x47 && buf[2] == 0xA7 && buf[3] == 0x01) {
+        int idx_e1 = -1, idx_e2 = -1;
+        unsigned real_w = 0, real_h = 0;
         buf[0] = 'I'; buf[1] = 'I'; buf[2] = 0x2A; buf[3] = 0x00;
         buf[4] = 8;   buf[5] = 0;   buf[6] = 0;    buf[7] = 0;
         n = *(unsigned short *)(buf + 8);
@@ -935,28 +937,40 @@ static void fix_exported_tiff_header(const char *path)
             if (typ == 3) val &= 0xFFFFu;
             if (tag == 0x19C9) {
                 *(unsigned short *)(buf + pos) = 0x00FE;
-            } else if (tag == 0x0103 && val > 10 && w == 0) {
-                *(unsigned short *)(buf + pos) = 0x0100;
-                w = (int)val;
-            } else if (tag == 0x0101) {
-                h = (int)val;
+            } else if (tag == 0x0103 && val > 10 && idx_e1 < 0) {
+                idx_e1 = (int)i;
+                real_h = val;
+            } else if (tag == 0x0101 && idx_e2 < 0) {
+                idx_e2 = (int)i;
+                real_w = val;
             } else if (tag == 0x0112 && val > 16) {
                 *(unsigned short *)(buf + pos) = 0x0111;
             }
         }
+        if (idx_e1 >= 0 && idx_e2 >= 0 && real_w > 0 && real_h > 0) {
+            unsigned p1 = 10 + (unsigned)idx_e1 * 12;
+            unsigned p2 = 10 + (unsigned)idx_e2 * 12;
+            *(unsigned short *)(buf + p1)     = 0x0100; /* ImageWidth */
+            *(unsigned short *)(buf + p1 + 2) = 4;      /* LONG */
+            *(unsigned *)(buf + p1 + 4)       = 1;
+            *(unsigned *)(buf + p1 + 8)       = real_w;
+            *(unsigned short *)(buf + p2)     = 0x0101; /* ImageLength */
+            *(unsigned short *)(buf + p2 + 2) = 4;      /* LONG */
+            *(unsigned *)(buf + p2 + 4)       = 1;
+            *(unsigned *)(buf + p2 + 8)       = real_h;
+            w = (int)real_w;
+            h = (int)real_h;
+        }
         if (h > 0) {
             for (i = 0; i < n; i++) {
                 unsigned pos = 10 + i * 12;
-                unsigned short tag, typ;
-                unsigned val;
+                unsigned short tag;
                 if (pos + 12 > nr) break;
                 tag = *(unsigned short *)(buf + pos);
-                typ = *(unsigned short *)(buf + pos + 2);
-                val = *(unsigned *)(buf + pos + 8);
-                if (typ == 3) val &= 0xFFFFu;
-                if (tag == 0x0116 && val > (unsigned)h) {
-                    if (typ == 3) *(unsigned short *)(buf + pos + 8) = (unsigned short)h;
-                    else *(unsigned *)(buf + pos + 8) = (unsigned)h;
+                if (tag == 0x0116) {
+                    *(unsigned short *)(buf + pos + 2) = 4; /* LONG */
+                    *(unsigned *)(buf + pos + 4)       = 1;
+                    *(unsigned *)(buf + pos + 8)       = (unsigned)h;
                 }
             }
         }
@@ -1952,47 +1966,46 @@ static int install_inline_hook(void *target, const unsigned char *expected, size
 
 static void __cdecl hook_merg_7f9bf(unsigned long ebp)
 {
-    double x1 = 0.0, x2 = 0.0;
-    int dpi = 0, lpi = 0, w_in = 0, h_in = 0, real_w = 0, real_h = 0;
+    double x1 = 0.0, x2 = 0.0, true_x2 = 0.0;
+    long long dpi_64 = 0, lpi_64 = 0, w_in_64 = 0, h_in_64 = 0;
+    int real_w = 0, real_h = 0;
     unsigned char fmt = 0;
     ReadProcessMemory(GetCurrentProcess(), (LPCVOID)(ebp - 0x1b0), &x1, 8, NULL);
     ReadProcessMemory(GetCurrentProcess(), (LPCVOID)(ebp - 0x1b8), &x2, 8, NULL);
-    ReadProcessMemory(GetCurrentProcess(), (LPCVOID)(ebp + 0x0C), &dpi, 4, NULL);
-    ReadProcessMemory(GetCurrentProcess(), (LPCVOID)(ebp + 0x14), &lpi, 4, NULL);
-    ReadProcessMemory(GetCurrentProcess(), (LPCVOID)(ebp + 0x1C), &w_in, 4, NULL);
-    ReadProcessMemory(GetCurrentProcess(), (LPCVOID)(ebp + 0x24), &h_in, 4, NULL);
+    ReadProcessMemory(GetCurrentProcess(), (LPCVOID)(ebp + 0x0C), &dpi_64, 8, NULL);
+    ReadProcessMemory(GetCurrentProcess(), (LPCVOID)(ebp + 0x14), &lpi_64, 8, NULL);
+    ReadProcessMemory(GetCurrentProcess(), (LPCVOID)(ebp + 0x1C), &w_in_64, 8, NULL);
+    ReadProcessMemory(GetCurrentProcess(), (LPCVOID)(ebp + 0x24), &h_in_64, 8, NULL);
     ReadProcessMemory(GetCurrentProcess(), (LPCVOID)(ebp + 0x2C), &fmt, 1, NULL);
     ReadProcessMemory(GetCurrentProcess(), (LPCVOID)0x5230D0, &real_w, 4, NULL);
     ReadProcessMemory(GetCurrentProcess(), (LPCVOID)0x5230D4, &real_h, 4, NULL);
 
-    if (dpi <= 0) {
-        dpi = 720000;
-        WriteProcessMemory(GetCurrentProcess(), (LPVOID)(ebp + 0x0C), &dpi, 4, NULL);
+    if (dpi_64 <= 0) {
+        dpi_64 = 3000000LL;
+        WriteProcessMemory(GetCurrentProcess(), (LPVOID)(ebp + 0x0C), &dpi_64, 8, NULL);
     }
-    if (lpi <= 0) {
-        lpi = 3200;
-        WriteProcessMemory(GetCurrentProcess(), (LPVOID)(ebp + 0x14), &lpi, 4, NULL);
+    if (lpi_64 <= 0) {
+        lpi_64 = 240000LL;
+        WriteProcessMemory(GetCurrentProcess(), (LPVOID)(ebp + 0x14), &lpi_64, 8, NULL);
     }
-    if (w_in <= 0 || (double)w_in * (double)lpi < 10000.0) {
-        w_in = (10000 / lpi) + 1;
-        if (w_in < 100) w_in = 100;
-        WriteProcessMemory(GetCurrentProcess(), (LPVOID)(ebp + 0x1C), &w_in, 4, NULL);
+    if (w_in_64 <= 0 || ((double)w_in_64 * (double)lpi_64) < 100000000.0) {
+        w_in_64 = 10000LL;
+        WriteProcessMemory(GetCurrentProcess(), (LPVOID)(ebp + 0x1C), &w_in_64, 8, NULL);
     }
-    if (h_in <= 0) {
-        h_in = 100;
-        WriteProcessMemory(GetCurrentProcess(), (LPVOID)(ebp + 0x24), &h_in, 4, NULL);
+    if (h_in_64 <= 0) {
+        h_in_64 = 10000LL;
+        WriteProcessMemory(GetCurrentProcess(), (LPVOID)(ebp + 0x24), &h_in_64, 8, NULL);
     }
     if (fmt < 1) {
         fmt = 1;
         WriteProcessMemory(GetCurrentProcess(), (LPVOID)(ebp + 0x2C), &fmt, 1, NULL);
     }
-    if (x2 <= 0.0 || x2 < (double)fmt * 16.0) {
-        double calc = (real_h > 0) ? (double)real_h : ((double)h_in * (double)dpi / 1000000.0);
-        if (calc < (double)fmt * 16.0) calc = (double)fmt * 16.0;
-        if (calc < 2336.0 && real_h <= 0) calc = 2336.0;
-        x2 = calc;
-        WriteProcessMemory(GetCurrentProcess(), (LPVOID)(ebp - 0x1b8), &x2, 8, NULL);
-    }
+    /* 真实物理高度像素数: (H_inch * 1e4) * (DPI * 1e4) / 1e8 */
+    true_x2 = ((double)h_in_64 * (double)dpi_64) / 100000000.0;
+    if (true_x2 < (double)fmt * 16.0) true_x2 = (double)fmt * 16.0;
+    x2 = true_x2;
+    WriteProcessMemory(GetCurrentProcess(), (LPVOID)(ebp - 0x1b8), &x2, 8, NULL);
+
     if (cfg_on("inject_x2", 0, "_inject_x2.txt")) {
         char inf[MAX_PATH];
         lstrcpyA(inf, g_dir); lstrcatA(inf, "_inject_x2.txt");
@@ -2005,21 +2018,22 @@ static void __cdecl hook_merg_7f9bf(unsigned long ebp)
             iv = atoi(tb);
             if (iv > 0) {
                 double nv = (double)iv;
+                x2 = nv;
                 WriteProcessMemory(GetCurrentProcess(), (LPVOID)(ebp - 0x1b8), &nv, 8, NULL);
             }
         }
     }
-    note("HOOK7F9BF dpi=%d lpi=%d fmt=%u X1=%.2f X2=%.2f real=%dx%d",
-         dpi, lpi, (unsigned)fmt, x1, x2, real_w, real_h);
+    note("HOOK7F9BF dpi=%lld lpi=%lld h_in=%lld fmt=%u X1=%.2f X2=%.2f real=%dx%d",
+         dpi_64, lpi_64, h_in_64, (unsigned)fmt, x1, x2, real_w, real_h);
 }
 
-static int parse_gjs_tiff_header(const char *path, int *out_w, int *out_h, int *out_off)
+static int parse_gjs_tiff_header(const char *path, int *out_w, int *out_h, int *out_off, int *is_ug_out)
 {
     unsigned char buf[512];
     HANDLE hf;
     DWORD nr = 0, fsz = 0;
     unsigned ifd_off = 8, cnt = 0, i;
-    int w = 0, h = 0, off = 0, rps = 0, spp = 0, sbc = 0;
+    int w = 0, h = 0, off = 0, spp = 0, sbc = 0, is_ug = 0;
     if (!path || IsBadReadPtr(path, 4)) return 0;
     hf = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, 0, OPEN_EXISTING, 0, 0);
     if (hf == INVALID_HANDLE_VALUE) return 0;
@@ -2027,7 +2041,10 @@ static int parse_gjs_tiff_header(const char *path, int *out_w, int *out_h, int *
     ReadFile(hf, buf, sizeof(buf), &nr, NULL);
     CloseHandle(hf);
     if (nr < 24) return 0;
-    if ((buf[0] == 'I' && buf[1] == 'I') || (buf[0] == 'M' && buf[1] == 'M')) {
+    if (buf[0] == 0x55 && buf[1] == 0x47 && buf[2] == 0xA7 && buf[3] == 0x01) {
+        is_ug = 1;
+        ifd_off = 8;
+    } else if ((buf[0] == 'I' && buf[1] == 'I') || (buf[0] == 'M' && buf[1] == 'M')) {
         ifd_off = *(unsigned *)(buf + 4);
     } else {
         ifd_off = 8;
@@ -2044,21 +2061,24 @@ static int parse_gjs_tiff_header(const char *path, int *out_w, int *out_h, int *
         typ = *(unsigned short *)(buf + pos + 2);
         val = *(unsigned *)(buf + pos + 8);
         if (typ == 3) val &= 0xFFFFu;
-        if (tag == 0x0100) w = (int)val;
-        else if (tag == 0x0103 && val > 10 && w == 0) w = (int)val;
-        else if (tag == 0x0116 && val > 0 && rps == 0) rps = (int)val;
-        else if (tag == 0x0101) h = (int)val;
-        else if (tag == 0x0111) off = (int)val;
-        else if (tag == 0x0112 && val > 16 && off == 0) off = (int)val;
-        else if (tag == 0x0115) spp = (int)val;
+        if (is_ug) {
+            if (tag == 0x0101) w = (int)val;
+            else if (tag == 0x0103 && val > 10 && h == 0) h = (int)val;
+            else if (tag == 0x0112 && val > 16 && off == 0) off = (int)val;
+        } else {
+            if (tag == 0x0100) w = (int)val;
+            else if (tag == 0x0101) h = (int)val;
+            else if (tag == 0x0111) off = (int)val;
+        }
+        if (tag == 0x0115) spp = (int)val;
         else if (tag == 0x0117) sbc = (int)val;
     }
-    if (w <= 0 && rps > 0) w = rps;
     if (w <= 0 && h > 0 && spp > 0 && sbc > 0) w = sbc / (h * spp);
     if (off <= 0 && sbc > 0 && fsz > (DWORD)sbc) off = (int)(fsz - (DWORD)sbc);
     if (out_w) *out_w = w;
     if (out_h) *out_h = h;
     if (out_off) *out_off = off;
+    if (is_ug_out) *is_ug_out = is_ug;
     return (w > 0 && h > 0);
 }
 
@@ -2079,21 +2099,19 @@ static void __cdecl hook_merg_7fbf1(unsigned long ebp)
             int f4 = *(int *)(arr + i2 * 16 + 4);
             int f8 = *(int *)(arr + i2 * 16 + 8);
             int fc = *(int *)(arr + i2 * 16 + 12);
-            if (f4 <= 0 || f8 <= 0 || fc <= 0) {
-                int pw = 0, ph = 0, poff = 0;
-                if (parse_gjs_tiff_header(fn, &pw, &ph, &poff)) {
-                    if (f4 <= 0 && pw > 0) { f4 = pw; *(int *)(arr + i2 * 16 + 4) = f4; }
-                    if (f8 <= 0 && ph > 0) { f8 = ph; *(int *)(arr + i2 * 16 + 8) = f8; }
-                    if (fc <= 0 && poff > 0) { fc = poff; *(int *)(arr + i2 * 16 + 12) = fc; }
-                }
+            int pw = 0, ph = 0, poff = 0, is_ug = 0;
+            if (parse_gjs_tiff_header(fn, &pw, &ph, &poff, &is_ug)) {
+                if (is_ug || f4 <= 0) { f4 = pw; *(int *)(arr + i2 * 16 + 4) = f4; }
+                if (is_ug || f8 <= 0) { f8 = ph; *(int *)(arr + i2 * 16 + 8) = f8; }
+                if (is_ug || fc <= 0) { fc = poff; *(int *)(arr + i2 * 16 + 12) = fc; }
             }
             if (i2 == 0) off0 = fc;
             if (f4 > 0 && (min_w == 0 || f4 < min_w)) min_w = f4;
             if (f8 > 0 && (min_h == 0 || f8 < min_h)) min_h = f8;
         }
     }
-    if (min_w <= 0) min_w = (real_h > 0) ? real_h : ((real_w > 0) ? real_w : 1);
-    if (min_h <= 0) min_h = (real_w > 0) ? real_w : ((real_h > 0) ? real_h : 1);
+    if (min_w <= 0) min_w = (real_w > 0) ? real_w : 1;
+    if (min_h <= 0) min_h = (real_h > 0) ? real_h : 1;
     WriteProcessMemory(GetCurrentProcess(), (LPVOID)(ebp - 0x124), &min_w, 4, NULL);
     WriteProcessMemory(GetCurrentProcess(), (LPVOID)(ebp - 0x128), &min_h, 4, NULL);
     note("HOOK7FBF1 cnt=%u min=%dx%d off0=%d", (unsigned)cnt, min_w, min_h, off0);
